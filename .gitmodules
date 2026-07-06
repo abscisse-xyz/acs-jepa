@@ -1,0 +1,3 @@
+[submodule "dependencies/pddl-generator"]
+	path = dependencies/pddl-generator
+	url = git@github.com:abscisse-xyz/pddl-generator.git
