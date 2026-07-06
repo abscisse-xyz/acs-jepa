@@ -20,8 +20,11 @@ where $\mathcal{G}(g_p)$ is the set of latent states satisfying the partial goal
 The feasible goal set may be defined as
 
 $$
-\mathcal{G}(g_p) =
+\begin{aligned}
+\mathcal{G}(g_p)
+&=
 \{z : C(g_p,z)=1\}
+\end{aligned}
 $$
 
 or, in a soft formulation, by an energy function
@@ -35,7 +38,9 @@ where lower energy corresponds to greater satisfaction of the partial goal.
 The resulting planning objective is
 
 $$
-a_{0:T-1}^* =
+\begin{aligned}
+a_{0:T-1}^*
+&=
 \arg\min_{a_{0:T-1}}
 \left[
 E_g(z_T,g_p)
@@ -46,6 +51,7 @@ E_g(z_T,g_p)
 \beta
 \sum_{t=0}^{T-1} c_z(z_t)
 \right]
+\end{aligned}
 $$
 
 subject to:
@@ -74,8 +80,11 @@ $$
 A corresponding terminal cost is
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 -\log P_\psi(\text{inside}(A,B)=1 \mid z_T)
+\end{aligned}
 $$
 
 For a goal containing several predicates,
@@ -87,10 +96,13 @@ $$
 the goal energy can be written as
 
 $$
-E_g(z,g_p) =
+\begin{aligned}
+E_g(z,g_p)
+&=
 \sum_{k=1}^{K}
 w_k
 \ell\left(h_{\psi,k}(z), y_k\right)
+\end{aligned}
 $$
 
 where:
@@ -103,10 +115,13 @@ where:
 For binary predicates:
 
 $$
-\ell(h,y) =
+\begin{aligned}
+\ell(h,y)
+&=
 -\left[
 y\log h + (1-y)\log(1-h)
 \right]
+\end{aligned}
 $$
 
 Only predicates specified by the partial goal contribute to the terminal cost. Unspecified aspects of the state remain unconstrained by this term.
@@ -146,11 +161,14 @@ $$
 The corresponding cost is
 
 $$
-J^{(i)}=
+\begin{aligned}
+J^{(i)}
+&=
 E_g(z_T^{(i)},g_p)
 +
 \lambda
 \sum_t c_a(a_t^{(i)})
+\end{aligned}
 $$
 
 The sampling distribution is then updated toward lower-cost samples.
@@ -204,14 +222,19 @@ $$
 is replaced by the negative log-likelihood
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 -\log p_\eta(z_T \mid g_p)
+\end{aligned}
 $$
 
 The planning objective becomes
 
 $$
-a_{0:T-1}^* =
+\begin{aligned}
+a_{0:T-1}^*
+&=
 \arg\min_{a_{0:T-1}}
 \left[
 -\log p_\eta(z_T \mid g_p)
@@ -219,6 +242,7 @@ a_{0:T-1}^* =
 \lambda
 \sum_t c_a(a_t)
 \right]
+\end{aligned}
 $$
 
 subject to:
@@ -230,8 +254,11 @@ $$
 This formulation is equivalent to an energy model, since any distribution induces the energy
 
 $$
-E_g(z,g_p) =
+\begin{aligned}
+E_g(z,g_p)
+&=
 -\log p_\eta(z\mid g_p)
+\end{aligned}
 $$
 
 up to an additive constant.
@@ -241,33 +268,40 @@ up to an additive constant.
 A simple model is a Gaussian conditional distribution:
 
 $$
-p_\eta(z_g \mid g_p) =
+\begin{aligned}
+p_\eta(z_g \mid g_p)
+&=
 \mathcal{N}
 \left(
 z_g;
 \mu_\eta(g_p),
 \Sigma_\eta(g_p)
 \right)
+\end{aligned}
 $$
 
 The corresponding negative log-likelihood is
 
 $$
--\log p_\eta(z_T \mid g_p) =
+\begin{aligned}
+-\log p_\eta(z_T \mid g_p)
+&=
 \frac{1}{2}
 (z_T-\mu_g)^\top
 \Sigma_g^{-1}
 (z_T-\mu_g)
 +
 \text{const}
+\end{aligned}
 $$
 
 where:
 
 $$
-\mu_g=\mu_\eta(g_p),
-\qquad
-\Sigma_g=\Sigma_\eta(g_p)
+\begin{aligned}
+\mu_g &= \mu_\eta(g_p), \\
+\Sigma_g &= \Sigma_\eta(g_p)
+\end{aligned}
 $$
 
 The covariance expresses uncertainty about unspecified dimensions.
@@ -291,7 +325,9 @@ Mismatch along that dimension is strongly penalized.
 For diagonal covariance, the cost becomes
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 \frac{1}{2}
 \sum_j
 \frac{
@@ -299,6 +335,7 @@ E_g(z_T,g_p) =
 }{
 \sigma_{g,j}^2
 }
+\end{aligned}
 $$
 
 This corresponds to a soft masking mechanism.
@@ -316,7 +353,9 @@ There may be many valid table positions, making a single Gaussian overly restric
 A mixture model can represent multiple valid modes:
 
 $$
-p_\eta(z_g\mid g_p) =
+\begin{aligned}
+p_\eta(z_g\mid g_p)
+&=
 \sum_{m=1}^{M}
 \pi_m(g_p)
 \mathcal{N}
@@ -325,12 +364,15 @@ z_g;
 \mu_m(g_p),
 \Sigma_m(g_p)
 \right)
+\end{aligned}
 $$
 
 The induced energy is
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 -\log
 \sum_{m=1}^{M}
 \pi_m(g_p)
@@ -340,6 +382,7 @@ z_T;
 \mu_m(g_p),
 \Sigma_m(g_p)
 \right)
+\end{aligned}
 $$
 
 The planner may therefore converge to any valid mode.
@@ -365,9 +408,12 @@ $$
 A practical planning objective is
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 \min_{m=1,\dots,M}
 \lVert z_T-\tilde z_g^{(m)} \rVert^2
+\end{aligned}
 $$
 
 where:
@@ -401,7 +447,9 @@ $$
 The planner optimizes the action sequence according to
 
 $$
-a_{0:T-1}^{*} =
+\begin{aligned}
+a_{0:T-1}^{*}
+&=
 \arg\min
 \left[
 -\log p_\eta(z_T\mid g_p)
@@ -409,6 +457,7 @@ a_{0:T-1}^{*} =
 \lambda
 \sum_t c_a(a_t)
 \right]
+\end{aligned}
 $$
 
 ### Key interpretation
@@ -459,8 +508,11 @@ $$
 The terminal cost is then
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 \lVert z_T^c-z_g^c \rVert^2
+\end{aligned}
 $$
 
 rather than the full latent distance
@@ -472,7 +524,9 @@ $$
 The planner minimizes
 
 $$
-a_{0:T-1}^* =
+\begin{aligned}
+a_{0:T-1}^*
+&=
 \arg\min_{a_{0:T-1}}
 \left[
 \lVert z_T^c-z_g^c \rVert^2
@@ -482,6 +536,7 @@ a_{0:T-1}^* =
 +
 \beta R(z_T^u)
 \right]
+\end{aligned}
 $$
 
 subject to:
@@ -495,8 +550,11 @@ The optional term $R(z_T^u)$ keeps the unconstrained component in-distribution.
 For example,
 
 $$
-R(z_T^u) =
+\begin{aligned}
+R(z_T^u)
+&=
 -\log p(z_T^u \mid z_T^c)
+\end{aligned}
 $$
 
 This matches the constrained goal variables while preserving plausibility of the unspecified variables.
@@ -517,17 +575,23 @@ where:
 The masked objective is
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 \lVert m(g_p)\odot(z_T-z_g) \rVert^2
+\end{aligned}
 $$
 
 Equivalently,
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 \sum_{j=1}^{d}
 m_j(g_p)
 (z_{T,j}-z_{g,j})^2
+\end{aligned}
 $$
 
 Only specified dimensions are penalized by this objective.
@@ -541,18 +605,23 @@ $$
 The corresponding objective is
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 \sum_j
 m_j(g_p)
 (z_{T,j}-z_{g,j})^2
+\end{aligned}
 $$
 
 This is equivalent to the diagonal Gaussian case from section 2 under the correspondence
 
 $$
+\begin{aligned}
 m_j(g_p)
-\propto
+&\propto
 \frac{1}{\sigma_{g,j}^2}
+\end{aligned}
 $$
 
 Thus, factorized latents and distributional goals are closely related.
@@ -562,8 +631,11 @@ Thus, factorized latents and distributional goals are closely related.
 For structured environments, object latents may be used:
 
 $$
-z =
+\begin{aligned}
+z
+&=
 (z^{(1)}, z^{(2)}, \dots, z^{(N)})
+\end{aligned}
 $$
 
 where each $z^{(i)}$ represents one object or entity.
@@ -577,10 +649,13 @@ $$
 The corresponding cost is
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 \left\lVert
 r(z_T^{(k)}) - y
 \right\rVert^2
+\end{aligned}
 $$
 
 where $r$ extracts the relevant property, e.g. position.
@@ -594,12 +669,15 @@ $$
 the cost may be written as
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 \ell
 \left(
 h_\psi(z_T^{(i)},z_T^{(j)}),
 1
 \right)
+\end{aligned}
 $$
 
 where $h_\psi$ predicts whether the relation is true.
@@ -627,11 +705,14 @@ $$
 or in object-factorized form:
 
 $$
-z_{t+1}^{(i)} =
+\begin{aligned}
+z_{t+1}^{(i)}
+&=
 f_\theta^{(i)}
 \left(
 z_t^{(1:N)},a_t
 \right)
+\end{aligned}
 $$
 
 The goal encoder produces either
@@ -649,8 +730,11 @@ $$
 The planner then minimizes
 
 $$
-E_g(z_T,g_p) =
+\begin{aligned}
+E_g(z_T,g_p)
+&=
 \lVert m\odot(z_T-z_g) \rVert^2
+\end{aligned}
 $$
 
 plus action and regularization costs.
@@ -678,7 +762,9 @@ This avoids enforcing arbitrary completions of hidden or unspecified state.
 All three approaches have the common form
 
 $$
-a_{0:T-1}^* =
+\begin{aligned}
+a_{0:T-1}^*
+&=
 \arg\min_{a_{0:T-1}}
 \left[
 E_g(z_T,g_p)
@@ -689,6 +775,7 @@ E_g(z_T,g_p)
 \beta
 \sum_t c_{\text{reg}}(z_t)
 \right]
+\end{aligned}
 $$
 
 with:

@@ -3,7 +3,9 @@
 Unified planning solution:
 
 $$
-a_{0:T-1}^* =
+\begin{aligned}
+a_{0:T-1}^*
+&=
 \arg\min_{a_{0:T-1}}
 \left[
 E_g(z_T,g_p)
@@ -11,6 +13,7 @@ E_g(z_T,g_p)
 \lambda
 \sum_t c_a(a_t)
 \right]
+\end{aligned}
 $$
 
 We find $a_{0:T-1}^*$ with continuous MPPI in latent action space and receding

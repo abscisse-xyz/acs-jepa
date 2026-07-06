@@ -8,10 +8,15 @@ current dataset is centered around a transition (current_state, action, next_sta
 we want to change this approach to a k step rollout while traing and inference. this requires changing the dataset from being centered around transitions to trajectories. a training instance becomes a sequence of state (graphs) and a sequence of actions (a time axis can be added to identify nodes and edges at a give time point in the sequence).
 the graph encoder produces embeddings for nodes, predicts and the graph, the graph encoder is independant of time (sequence).
 the node and graph latent encoder is time dependent and the dynamic changes to:
-    $$z_0 = e_\eta(x_0)$$ 
-    $$\qquad z_t = f_\psi(x_{t-v:t})$$ 
-    $$\qquad u_t = q_\omega(a_{t-u:t})$$
-    $$\hat z_{t+1} = g_\theta(z_{t-w:t}, u_{t-w:t}).$$
+
+$$
+\begin{aligned}
+z_0 &= e_\eta(x_0) \\
+z_t &= f_\psi(x_{t-v:t}) \\
+u_t &= q_\omega(a_{t-u:t}) \\
+\hat z_{t+1} &= g_\theta(z_{t-w:t}, u_{t-w:t})
+\end{aligned}
+$$
 
 with $e$ being the graph encoder(embeddings), $f$ state latent space encoder, $q$ action latent space encoder, and $g$ latent space predictor.
 
@@ -19,11 +24,30 @@ At training time, we compute k-step rollout losses for latent space predication 
 where $L_1$ is the single-step loss. The order of a prediction is the
 number of calls to the predictor function required to obtain it from a groundtruth representation. For
 a predicted representation $z^{(k)}_t$, we denote the timestep it corresponds to as $t$ and its prediction order
-as $k$, with $z(0) = z= f_\theta(x)$. For $k≥1, L_k$ is defined as:
-$$L_k =\sum_{t=1}^{T-k} \lVert g_\theta(z^{(k−1)}_{t−w:t} ,u_{t−w:t})−z_{t+1}\rVert $$
+as $k$, with $z(0) = z= f_\theta(x)$. For $k \ge 1$, $L_k$ is defined as:
 
-where $z^{(k)}_t$ is obtained by recursively unrolling the predictor for all $t≤T$, as
-$$z^{(k)}_{t+1} = g_\theta(z^{(k−1)}_{t−w:t} ,u_{t−w:t}), \qquad z^{(0)}_t = f_\psi(x_{t−v:t}).$$
+$$
+\begin{aligned}
+L_k
+&=
+\sum_{t=1}^{T-k}
+\lVert
+g_\theta(z^{(k-1)}_{t-w:t}, u_{t-w:t}) - z_{t+1}
+\rVert
+\end{aligned}
+$$
+
+where $z^{(k)}_t$ is obtained by recursively unrolling the predictor for all $t \le T$, as
+
+$$
+\begin{aligned}
+z^{(k)}_{t+1}
+&=
+g_\theta(z^{(k-1)}_{t-w:t}, u_{t-w:t}),
+\qquad
+z^{(0)}_t = f_\psi(x_{t-v:t})
+\end{aligned}
+$$
 
 Other loss stays the same.
 
@@ -33,7 +57,9 @@ Other loss stays the same.
 
 The current implementation uses a Markov latent transition:
 
-$$\hat z_{t+1} = g_\theta(z_t, u_t).$$
+$$
+\hat z_{t+1} = g_\theta(z_t, u_t)
+$$
 
 This is the cleaner baseline for graph JEPA because a full PDDL state graph plus
 a grounded action is expected to determine the next state. In that setting,
@@ -43,17 +69,23 @@ repeated application of the same transition model.
 This does not mean the model is fully memoryless. Temporal context can already
 enter through the encoders:
 
-$$z_t = f_\psi(x_{t-v:t}), \qquad u_t = q_\omega(a_{t-u:t}).$$
+$$
+z_t = f_\psi(x_{t-v:t}), \qquad u_t = q_\omega(a_{t-u:t})
+$$
 
 So the preferred first mechanism for history is to make `StateEncoderF` and the
 action encoder produce contextual latents, while keeping the predictor contract
 simple:
 
-$$\hat z_{t+1} = g_\theta(z_t, u_t).$$
+$$
+\hat z_{t+1} = g_\theta(z_t, u_t)
+$$
 
 An RNN/windowed predictor,
 
-$$\hat z_{t+1} = g_\theta(z_{t-w:t}, u_{t-w:t}),$$
+$$
+\hat z_{t+1} = g_\theta(z_{t-w:t}, u_{t-w:t})
+$$
 
 can be useful if the single latent state is not sufficiently Markov, for example
 when the latent bottleneck drops object-level details or long-horizon losses show

@@ -23,7 +23,7 @@ Based on the paper (ICLR 2026 Workshop on World Models) and the code in `ebj_jep
 - IDM is critical: without it the model collapses to 1% planning success (Table 4) due to spurious correlations.
 
 **Planning Objective** — `ReprTargetDistMPCObjective` (`eb_jepa/planning.py`)
-- Implements paper Eq. (14): `E_plan = Σ_t ‖fθ(x_g) − ẑ_t‖²`
+- Implements paper Eq. (14): `E_plan = sum_t ||f_theta(x_g) - z_hat_t||^2`
 - `sum_all_diffs=True` (cumulative cost over all timesteps) outperforms final-state-only by 8%.
 
 **Planners** — `MPPIPlanner` / `CEMPlanner` (`eb_jepa/planning.py`)
@@ -37,13 +37,13 @@ Based on the paper (ICLR 2026 Workshop on World Models) and the code in `ebj_jep
 
 ```
 Training:
-  (x_t, a_t) → ImpalaEncoder → z_t
-  (z_t, a_t) → RNNPredictor  → ẑ_{t+1}
-  Loss = MSE(ẑ_{t+1}, z_{t+1}) + VC_IDM_Sim_Regularizer(z_{1:T})
+  (x_t, a_t) -> ImpalaEncoder -> z_t
+  (z_t, a_t) -> RNNPredictor  -> z_hat_{t+1}
+  Loss = MSE(z_hat_{t+1}, z_{t+1}) + VC_IDM_Sim_Regularizer(z_{1:T})
 
 Planning:
-  x_0, x_g  → encode → z_0, z_g
-  Optimize {a_0:H} via MPPI to minimize Σ‖z_g − ẑ_t‖²
+  x_0, x_g  -> encode -> z_0, z_g
+  Optimize {a_0:H} via MPPI to minimize sum_t ||z_g - z_hat_t||^2
   Execute a_0, observe x_1, replan
 ```
 ---

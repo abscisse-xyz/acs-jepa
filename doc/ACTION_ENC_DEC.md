@@ -45,23 +45,28 @@ constructing a universal set of typed argument slots.
 For action $a_i$, define the type-local occurrence index
 
 $$
+\begin{aligned}
 \ell_{i,j}
-=
+&=
 \left|
 \{h < j : \tau_{i,h}=\tau_{i,j}\}
-\right|.
+\right|
+\end{aligned}
 $$
 
 Then define its slot signature as
 
 $$
-\Omega_i =
+\begin{aligned}
+\Omega_i
+&=
 \left(
 (\tau_{i,0},\ell_{i,0}),
 (\tau_{i,1},\ell_{i,1}),
 \dots,
 (\tau_{i,k_i-1},\ell_{i,k_i-1})
-\right).
+\right)
+\end{aligned}
 $$
 
 The second component is the occurrence index of that type within the action
@@ -73,12 +78,15 @@ $(\text{junction},0)$ and $(\text{junction},1)$.
 The global slot set is the ordered union
 
 $$
-\Omega =
+\begin{aligned}
+\Omega
+&=
 \operatorname{sort}
 \left(
 \bigcup_{a_i \in \mathcal{A}}
 \{(\tau_{i,j}, \ell_{i,j}) : 0 \le j < k_i\}
-\right).
+\right)
+\end{aligned}
 $$
 
 Let $K = |\Omega|$. Each action schema $a_i$ induces a binary mask
@@ -146,8 +154,9 @@ embedding from the state graph.
 The resulting action encoder can be written abstractly as
 
 $$
+\begin{aligned}
 e_a(\bar a, z_t)
-=
+&=
 \rho
 \left(
 e_{\mathcal{A}}(\operatorname{action\_id}),
@@ -155,7 +164,8 @@ e_{\mathcal{A}}(\operatorname{action\_id}),
 \left(e_{\Omega}(r), e_{\mathrm{role}}(j_r), z_t^{(u_r)}\right)
 : m_r=1
 \right\}
-\right),
+\right)
+\end{aligned}
 $$
 
 where:
@@ -187,9 +197,12 @@ $$
 then for each argument position $j$ of $\hat a$:
 
 $$
-\hat o_j =
+\begin{aligned}
+\hat o_j
+&=
 \arg\max_{o \in \mathcal{O}_{\tau_{\hat a,j}}}
-p(o \mid \hat a, j, z_t).
+p(o \mid \hat a, j, z_t)
+\end{aligned}
 $$
 
 The type restriction $o \in \mathcal{O}_{\tau_{\hat a,j}}$ is part of decoding.
@@ -325,33 +338,42 @@ car, garage, junction
 The per-action slot signatures are
 
 $$
+\begin{aligned}
 \Omega_{\text{move}}
-=
-\left((\text{car},0),(\text{junction},0)\right),
+&=
+\left((\text{car},0),(\text{junction},0)\right)
+\end{aligned}
 $$
 
 $$
+\begin{aligned}
 \Omega_{\text{same\_line}}
-=
-\left((\text{junction},0),(\text{junction},1)\right),
+&=
+\left((\text{junction},0),(\text{junction},1)\right)
+\end{aligned}
 $$
 
 $$
+\begin{aligned}
 \Omega_{\text{busy}}
-=
-\left((\text{garage},0)\right).
+&=
+\left((\text{garage},0)\right)
+\end{aligned}
 $$
 
 Using lexicographic ordering over slots, the global slot set is
 
 $$
-\Omega =
+\begin{aligned}
+\Omega
+&=
 \left(
 (\text{car},0),
 (\text{garage},0),
 (\text{junction},0),
 (\text{junction},1)
-\right).
+\right)
+\end{aligned}
 $$
 
 The corresponding masks are
@@ -387,13 +409,16 @@ $$
 and
 
 $$
-u =
+\begin{aligned}
+u
+&=
 \left(
 \operatorname{id}(\text{car0}),
 -1,
 \operatorname{id}(\text{junction3}),
 -1
-\right).
+\right)
+\end{aligned}
 $$
 
 ---

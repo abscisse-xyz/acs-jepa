@@ -71,8 +71,9 @@ $$
 A planner can therefore optimize an energy
 
 $$
+\begin{aligned}
 a_{0:T-1}^{*}
-=
+&=
 \arg\min_{a_{0:T-1}}
 \left[
 E_g(z_T,g_p)
@@ -80,7 +81,8 @@ E_g(z_T,g_p)
 \lambda \sum_{t=0}^{T-1} c_a(a_t)
 +
 \beta \sum_{t=0}^{T-1} c_{\mathrm{reg}}(z_t)
-\right],
+\right]
+\end{aligned}
 $$
 
 subject to
@@ -181,11 +183,14 @@ $$
 `StateEncoderF` maps these embeddings into JEPA latent variables:
 
 $$
-z_t =
+\begin{aligned}
+z_t
+&=
 \left(
 z_t^{\mathrm{graph}},
 \{z_t^{(o)}\}_{o \in \mathcal{O}}
-\right).
+\right)
+\end{aligned}
 $$
 
 The same `forward()` handles single states and trajectory windows. Single-state
@@ -207,8 +212,9 @@ its arguments.
 The abstract action encoder can be written as
 
 $$
+\begin{aligned}
 e_a(\bar a, z_t)
-=
+&=
 \rho
 \left(
 e_{\mathcal{A}}(\operatorname{action\_id}),
@@ -216,7 +222,8 @@ e_{\mathcal{A}}(\operatorname{action\_id}),
 \left(e_{\mathrm{role}}(j), z_t^{(o_j)}\right)
 : 0 \le j < k_i
 \right\}
-\right),
+\right)
+\end{aligned}
 $$
 
 where $\rho$ is an order-aware or permutation-aware argument composition module.
@@ -231,20 +238,25 @@ $$
 define the type-local occurrence index
 
 $$
+\begin{aligned}
 \ell_{i,j}
-=
-\left|\{h < j : \tau_{i,h}=\tau_{i,j}\}\right|.
+&=
+\left|\{h < j : \tau_{i,h}=\tau_{i,j}\}\right|
+\end{aligned}
 $$
 
 The corresponding slot signature is
 
 $$
-\Omega_i =
+\begin{aligned}
+\Omega_i
+&=
 \left(
 (\tau_{i,0},\ell_{i,0}),
 \dots,
 (\tau_{i,k_i-1},\ell_{i,k_i-1})
-\right).
+\right)
+\end{aligned}
 $$
 
 The occurrence index is necessary when the same type appears more than once in
@@ -303,45 +315,52 @@ orders $k=1,\dots,K$. Order one is the $k=1$ horizon; higher orders
 compare recursively predicted latents against observed target latents:
 
 $$
+\begin{aligned}
 \mathcal{L}_{\mathrm{pred}}
-=
+&=
 \sum_{k=1}^{K}
 \alpha_k
 \frac{1}{K-k+1}
 \sum_{t=k}^{K}
-\ell(\hat z_t^{(k)}, z_t^{(0)}).
+\ell(\hat z_t^{(k)}, z_t^{(0)})
+\end{aligned}
 $$
 
 The full trajectory objective is:
 
 $$
+\begin{aligned}
 \mathcal{L}
-=
+&=
 \lambda_{\mathrm{pred}}
 \mathcal{L}_{\mathrm{pred}}(\hat z_{1:K}, z_{1:K})
 +
 \lambda_{\mathrm{vc}}
 \mathcal{L}_{\mathrm{vc}}(z_{1:K})
-+
+\\
+&\quad+
 \lambda_{\mathrm{sim}}
 \mathcal{L}_{\mathrm{sim}}(z_{0:K},\hat z_{1:K})
 +
 \lambda_{\mathrm{idm}}
-\mathcal{L}_{\mathrm{idm}}(z_{0:K},u_{0:K-1}).
+\mathcal{L}_{\mathrm{idm}}(z_{0:K},u_{0:K-1})
+\end{aligned}
 $$
 
 The prediction term compares graph and object latents:
 
 $$
+\begin{aligned}
 \mathcal{L}_{\mathrm{pred}}
-=
+&=
 w_g
 \lVert \hat z_{t+1}^{\mathrm{graph}} - z_{t+1}^{\mathrm{graph}}\rVert^2
 +
 w_o
 \frac{1}{|\mathcal{O}|}
 \sum_o
-\lVert \hat z_{t+1}^{(o)} - z_{t+1}^{(o)} \rVert^2.
+\lVert \hat z_{t+1}^{(o)} - z_{t+1}^{(o)} \rVert^2
+\end{aligned}
 $$
 
 The variance/covariance regularizer discourages latent collapse and is averaged
