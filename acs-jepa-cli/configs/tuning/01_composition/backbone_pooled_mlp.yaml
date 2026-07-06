@@ -1,0 +1,11 @@
+model:
+  action_encoder:
+    kind: pooled
+  predictor:
+    kind: mlp
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage1_backbone_pooled_mlp
+  tags:
+    stage: composition
+    variant: backbone_pooled_mlp

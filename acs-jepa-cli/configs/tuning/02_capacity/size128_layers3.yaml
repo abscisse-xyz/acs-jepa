@@ -1,0 +1,18 @@
+model:
+  graph_hidden_dim: 128
+  graph_embed_dim: 128
+  graph_layers: 3
+  latent_dim: 128
+  action_dim: 128
+  action_encoder:
+    hidden_dim: 128
+  predictor:
+    hidden_dim: 128
+  goal_head:
+    hidden_dim: 128
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage2_size128_layers3
+  tags:
+    stage: capacity
+    variant: size128_layers3

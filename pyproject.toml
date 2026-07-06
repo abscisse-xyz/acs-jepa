@@ -1,0 +1,70 @@
+[project]
+name = "acs-jepa"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.13.3",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.400",
+    "pytest>=8.3.5",
+    "pytest-order>=1.3.0",
+    "ruff>=0.11.10",
+    "black>=25.1.0",
+    "pytest-cov>=6.2.1",
+]
+[tool.uv.workspace]
+members = ["packages/acs-jepa-core", "dependencies/pddl-generator/packages/pddl-simulator", "acs-jepa-cli"]
+
+[tool.uv.sources]
+acs-jepa-core = { workspace = true }
+pddl-simulator = { workspace = true }
+acs-jepa-cli = { workspace = true }
+
+[project.optional-dependencies]
+notebook = [
+    "ipykernel>=6.29.5",
+]
+
+# test configuration
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q --import-mode=importlib --cov=. --cov-report=term --cov-fail-under=90"
+testpaths = [
+    "packages/**",
+]
+
+[tool.coverage.run]
+omit = [
+]
+
+# static type check
+[tool.pyright]
+include = [
+]
+# linting
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = [
+]
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = []
+[tool.ruff.lint.pycodestyle]
+max-line-length = 120
+[tool.black]
+line-length = 120
+target-version = ['py312']
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | build
+  | dist
+)/
+'''

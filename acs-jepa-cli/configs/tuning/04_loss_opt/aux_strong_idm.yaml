@@ -1,0 +1,10 @@
+model:
+  loss:
+    similarity_coeff: 0.1
+    inverse_dynamics_coeff: 0.5
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage4_aux_strong_idm
+  tags:
+    stage: loss_opt
+    variant: aux_strong_idm

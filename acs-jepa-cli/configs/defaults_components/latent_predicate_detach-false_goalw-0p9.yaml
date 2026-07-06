@@ -1,0 +1,25 @@
+model:
+  predictor:
+    kind: gru
+  loss:
+    prediction_coeff: 1.0
+    regularization_coeff: 1.0
+    similarity_coeff: 1.0
+    inverse_dynamics_coeff: 1.0
+  goal_head:
+    kind: predicate
+    num_components: 8
+    num_samples: 32
+
+trainer:
+  goal_head_detach: false
+  goal_loss_weight: 0.9
+
+data:
+  num_positive_atoms: 8
+  num_negative_atoms: 8
+  goal_positive_fraction: 0.5
+
+tracking:
+  mlflow_tracking_uri: http://localhost:8080
+  run_name: latent_predicate_detach-false_goalw-0p9

@@ -1,0 +1,9 @@
+model:
+  goal_head:
+    kind: predicate
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage1_goal_predicate
+  tags:
+    stage: composition
+    variant: goal_predicate

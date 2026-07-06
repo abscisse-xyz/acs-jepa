@@ -1,0 +1,219 @@
+# Template configuration for:
+#
+#   uv run --package acs-jepa-cli acs-jepa train DATASET_DIR \
+#     --output runs/example \
+#     --config acs-jepa-cli/configs/template.yaml
+#
+# Values here are loaded as the CLI defaults before applying user overrides.
+
+model:
+  # Hidden width for relational graph message-passing layers.
+  graph_hidden_dim: 64
+  # Output embedding size produced by the graph encoder for graphs and objects.
+  graph_embed_dim: 64
+  # Number of graph encoder message-passing layers.
+  graph_layers: 2
+  # JEPA latent size for graph-level and object-level state variables.
+  latent_dim: 64
+  # Size of the encoded grounded-action vector consumed by the predictor.
+  action_dim: 64
+  # Number of previous states used by the causal state GRU, or null for all history in the window.
+  state_context_steps: 1
+  # Number of previous actions used by the causal action GRU, or null for all history in the window.
+  action_context_steps: 1
+
+  action_encoder:
+    # Argument composition strategy over JEPA latent object arguments: pooled or rnn.
+    kind: pooled
+    # Hidden width for action argument composition.
+    hidden_dim: 64
+
+  predictor:
+    # Transition predictor architecture: mlp or gru.
+    kind: mlp
+    # Hidden width for the state encoder projection and transition predictor.
+    hidden_dim: 64
+
+  loss:
+    prediction:
+      # Weight for MSE between predicted and target graph latents.
+      graph_weight: 1.0
+      # Weight for MSE between predicted and target object latents.
+      object_weight: 1.0
+
+    regularization:
+      # Weight for hinge standard-deviation regularization.
+      std_coeff: 1.0
+      # Weight for covariance off-diagonal regularization.
+      cov_coeff: 1.0
+      # Minimum per-dimension latent standard deviation before hinge penalty.
+      std_margin: 1.0
+      # Which latent samples to regularize: graph, object, or both.
+      target: both
+
+    # Weight for the latent prediction loss term.
+    prediction_coeff: 1.0
+    # Weight for the variance/covariance regularization loss term.
+    regularization_coeff: 1.0
+    # Weight for temporal similarity loss; keep nonzero for tuning campaigns.
+    similarity_coeff: 0.1
+    # Weight for encoded-action inverse dynamics loss; keep nonzero for tuning campaigns.
+    inverse_dynamics_coeff: 0.1
+    # Optional per-order weights for K-step prediction losses; null uses uniform weights.
+    rollout_order_weights: null
+
+  goal_head:
+    # Optional auxiliary goal module: none, predicate, gaussian, gmm, or conditional_sampler.
+    kind: gmm
+    # Goal predicate argument composition strategy where supported: pooled or rnn.
+    argument_encoder: pooled
+    # Hidden width inside the goal head or goal-conditioned latent distribution.
+    hidden_dim: 64
+    # Number of mixture components when kind is gmm.
+    num_components: 4
+    # Number of generated samples when kind is conditional_sampler.
+    num_samples: 4
+
+trainer:
+  # Multiplier for the core JEPA loss before adding auxiliary goal loss.
+  jepa_loss_weight: 1.0
+  # Multiplier for the auxiliary goal-head loss.
+  goal_loss_weight: 1.0
+  # true trains the goal head on detached target latents; false lets gradients flow into JEPA.
+  goal_head_detach: true
+  # Positive global gradient-norm clip value, or null to disable clipping.
+  grad_clip_norm: null
+
+optimizer:
+  # Optimizer implementation. V1 supports adam.
+  name: adam
+  # Adam learning rate.
+  lr: 0.001
+  # Adam weight decay coefficient.
+  weight_decay: 0.0
+  scheduler:
+    # Learning-rate scheduler: warmup_cosine or none.
+    kind: warmup_cosine
+    # Fraction of total training steps spent linearly warming up.
+    warmup_ratio: 0.1
+    # Minimum learning rate used by cosine annealing after warmup.
+    min_lr: 0.00001
+    # Initial warmup factor multiplied by lr at the first scheduler step.
+    start_factor: 1.0e-8
+
+data:
+  # Number of trajectory-window examples per training/evaluation batch.
+  batch_size: 24
+  # Number of DataLoader worker processes.
+  num_workers: 0
+  # Fraction of problems reserved for validation after merging all dataset directories.
+  val_fraction: 0.2
+  # Fraction of problems reserved for testing after merging all dataset directories.
+  test_fraction: 0.0
+  # K in K-step rollout: each sample contains K actions and K + 1 states.
+  rollout_steps: 4
+  # Number of true atoms sampled per transition for goal-head training.
+  num_positive_atoms: 2
+  # Number of false atoms sampled per transition for goal-head training.
+  num_negative_atoms: 2
+  # Fraction of positive samples drawn from goal atoms instead of current-state atoms.
+  goal_positive_fraction: 0.5
+  # Maximum number of goal atoms encoded per transition, or null for all atoms.
+  max_goal_atoms: null
+
+training:
+  # Number of full passes over the training split.
+  epochs: 1
+  # Run validation every N optimizer steps; set 0 to disable periodic evaluation.
+  eval_every_steps: 50
+  # Save checkpoints every N optimizer steps; set 0 to disable periodic checkpoints.
+  checkpoint_every_steps: 100
+
+planning:
+  # continuous_mppi samples free latents; gmm_mppi seeds latent search from encoded grounded actions;
+  # structured_ce samples typed grounded action sequences directly.
+  kind: gmm_mppi
+  # Latent planning horizon H.
+  horizon: 4
+  # Continuous MPPI population size.
+  num_samples: 256
+  # Fraction of samples used to update the Gaussian prior.
+  elite_frac: 0.1
+  # Maximum MPPI optimization iterations per replan.
+  max_iters: 80
+  # Softmax temperature for elite weighting.
+  temperature: 1.0
+  # Exponential smoothing for prior updates.
+  smoothing: 0.7
+  # Sampling noise multiplier.
+  noise_std: 1.0
+  # Stop when recent elite quantiles stabilize below this tolerance.
+  convergence_tol: 0.0001
+  # Number of recent elite thresholds used by quantile-stability stopping.
+  quantile_window: 5
+  # Keep the previous best sample in the next population.
+  elitism: true
+  # Increase sample count after stalled elite thresholds.
+  face_adaptive: false
+  # Maximum sample count when face_adaptive is true, or null for the default growth cap.
+  num_samples_max: null
+  # Number of stalled iterations before increasing FACE sample count.
+  face_stall_iters: 3
+  # Non-finite score handling: raise, ignore, or replace.
+  nan_policy: raise
+  # Number of decoded valid actions to apply before replanning.
+  apply_steps: 1
+  # Maximum simulator actions before the planner stops.
+  max_total_actions: 64
+  # Constant per-action diagnostic cost.
+  constant_action_cost: 0.0
+  # Number of MPPI/decode retries when the first decoded action is invalid.
+  max_decode_attempts: 3
+  # Penalty assigned to candidates whose decoded first action was already rejected.
+  invalid_action_penalty: 1000.0
+  # Initial diagonal Gaussian standard deviation over action latents.
+  initial_std: 1.0
+  # Number of grounded actions used as GMM seed components when kind=gmm_mppi.
+  action_pool_size: 512
+  # Optional GMM component std override; null uses initial_std.
+  component_std: null
+  # Minimum/maximum drifting GMM component standard deviations.
+  min_std: 0.000001
+  max_std: null
+  # Dirichlet prior for action-space samplers used by GMM seeding and structured CE.
+  dirichlet_prior: 0.0
+
+  action_decoder:
+    # Decode latent actions by exhaustive search, categorical CEM, or categorical MPPI.
+    # exact, cem, mppi
+    method: cem
+    # Latent similarity metric: l2 or cosine.
+    metric: l2
+    # Decoder samples for cem/mppi; null lets the decoder choose from the action space size.
+    num_samples: 256
+    # Elite fraction for categorical decoder optimization.
+    elite_frac: 0.1
+    # Maximum categorical decoder iterations.
+    max_iters: 30
+    # Smoothing for categorical decoder distribution updates.
+    smoothing: 0.7
+    # Dirichlet prior added to categorical decoder probabilities.
+    dirichlet_prior: 0.0
+    # Softmax temperature for categorical decoder MPPI.
+    temperature: 1.0
+    # Exact decoder chunk size for large grounded action spaces; null encodes all candidates at once.
+    decode_chunk_size: null
+
+tracking:
+  # MLflow tracking URI. null uses MLflow's default local tracking behavior.
+  # Example file backend:
+  # mlflow_tracking_uri: file:///absolute/path/to/mlruns
+  mlflow_tracking_uri: null
+  # MLflow experiment name.
+  experiment_name: acs-jepa
+  # MLflow run name, or null to use the CLI-generated fallback.
+  run_name: null
+  # MLflow run tags as a string-like mapping.
+  tags: {}
+  # true logs config and run artifacts such as resolved config/checkpoints.
+  log_artifacts: true

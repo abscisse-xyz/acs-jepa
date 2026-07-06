@@ -1,0 +1,11 @@
+model:
+  goal_head:
+    kind: gmm
+trainer:
+  goal_head_detach: true
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage1_gmm_detach_true
+  tags:
+    stage: composition
+    variant: gmm_detach_true

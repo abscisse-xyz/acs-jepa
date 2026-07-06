@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acs-jepa-cli"
+version = "0.1.0"
+description = "cli app for training and test"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "acs-jepa-core",
+    "duckdb>=1.5.2",
+    "mlflow>=3.12.0",
+    "omegaconf>=2.3.0",
+    "pddl-simulator",
+    "tqdm>=4.67.3",
+]
+
+[dependency-groups]
+dev = [
+]
+
+[project.scripts]
+acs-jepa = "acs_jepa_cli.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# test configuration
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q --import-mode=importlib"
+pythonpath = [
+    "src"
+]
+testpaths = [
+    "tests"
+]

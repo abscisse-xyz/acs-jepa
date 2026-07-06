@@ -1,0 +1,11 @@
+model:
+  action_encoder:
+    kind: rnn
+  predictor:
+    kind: gru
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage1_backbone_rnn_gru
+  tags:
+    stage: composition
+    variant: backbone_rnn_gru

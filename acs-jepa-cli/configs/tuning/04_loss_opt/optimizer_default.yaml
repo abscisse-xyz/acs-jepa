@@ -1,0 +1,11 @@
+trainer:
+  grad_clip_norm: null
+optimizer:
+  lr: 0.001
+  weight_decay: 0.0
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage4_optimizer_default
+  tags:
+    stage: loss_opt
+    variant: optimizer_default

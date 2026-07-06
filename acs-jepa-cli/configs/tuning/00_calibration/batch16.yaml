@@ -1,0 +1,9 @@
+data:
+  batch_size: 16
+  rollout_steps: 4
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage0_batch16
+  tags:
+    stage: calibration
+    variant: batch16

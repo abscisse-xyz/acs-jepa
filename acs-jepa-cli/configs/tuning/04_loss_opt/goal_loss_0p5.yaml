@@ -1,0 +1,8 @@
+trainer:
+  goal_loss_weight: 0.5
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage4_goal_loss_0p5
+  tags:
+    stage: loss_opt
+    variant: goal_loss_0p5

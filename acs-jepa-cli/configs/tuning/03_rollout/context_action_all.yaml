@@ -1,0 +1,9 @@
+model:
+  state_context_steps: 1
+  action_context_steps: null
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage3_context_action_all
+  tags:
+    stage: rollout
+    variant: context_action_all

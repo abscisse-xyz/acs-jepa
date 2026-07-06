@@ -1,0 +1,11 @@
+model:
+  action_encoder:
+    kind: pooled
+  predictor:
+    kind: gru
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage1_backbone_pooled_gru
+  tags:
+    stage: composition
+    variant: backbone_pooled_gru

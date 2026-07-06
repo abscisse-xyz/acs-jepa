@@ -1,0 +1,13 @@
+planning:
+  num_samples: 512
+  max_iters: 100
+  action_decoder:
+    method: cem
+    num_samples: 256
+    max_iters: 30
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage5_cem_512_iters100
+  tags:
+    stage: planning
+    variant: cem_512_iters100

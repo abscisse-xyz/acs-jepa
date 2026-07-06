@@ -1,0 +1,50 @@
+# Python-generated files
+__pycache__/
+**/__pycache__/
+*.py[oc]
+**/*.py[oc]
+build/
+**/build/
+dist/
+**/dist/
+wheels/
+**/wheels/
+*.egg-info
+**/*.egg-info
+
+# Virtual environments
+.venv
+**/.venv
+
+
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+
+### VS Code ###
+.vscode/
+
+### Mac OS ###
+.DS_Store
+
+### env
+.env
+.env_*
+**/.env
+
+### local
+.local/
+**/**.local/
+
+### database files
+**.db
+**/**.db
+
+### scratch files
+scratch.**
+**/scratch.**
+
+### 
+.coverage

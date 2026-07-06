@@ -1,0 +1,9 @@
+model:
+  goal_head:
+    kind: gmm
+tracking:
+  experiment_name: acs-jepa-tuning-v1
+  run_name: stage1_goal_gmm
+  tags:
+    stage: composition
+    variant: goal_gmm
