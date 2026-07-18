@@ -1,0 +1,18 @@
+data:
+  batch_size: 8
+  rollout_steps: 4
+
+training:
+  epochs: 3
+  eval_every_steps: 20
+  checkpoint_every_steps: 50
+
+tracking:
+  run_name: smoke_default_seed0
+  tags:
+    stage: smoke
+    fidelity: smoke
+    hypothesis: default_pipeline_learns_without_instability
+    parent_run: none
+    sample_id: citycar-smoke-20260717
+    variant: default

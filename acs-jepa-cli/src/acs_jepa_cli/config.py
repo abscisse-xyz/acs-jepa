@@ -8,7 +8,7 @@ from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "default.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "script" / "configs" / "default.yaml"
 ConfigPathInput = str | Path | Sequence[str | Path] | None
 
 

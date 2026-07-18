@@ -11,9 +11,12 @@ from acs_jepa import (
     ConditionalSampleTerminalLatentGeneratorG,
     DiagonalGaussianTerminalLatentDistributionP,
     GaussianMixtureTerminalLatentDistributionP,
+    GraphEncodedActionInverseDynamicsLoss,
+    GraphInverseDynamicsModel,
     GraphJEPA,
     GraphJEPALossModule,
     GraphLatentPredictionLoss,
+    GraphTemporalSimilarityLoss,
     GraphVCLoss,
     JepaTrainer,
     JepaTrainerConfig,
@@ -142,6 +145,19 @@ def build_jepa(
         hidden_dim=int(model_cfg.predictor.hidden_dim),
     )
     loss_cfg = model_cfg.loss
+    similarity_coeff = float(loss_cfg.similarity_coeff)
+    inverse_dynamics_coeff = float(loss_cfg.inverse_dynamics_coeff)
+    enable_auxiliary_terms = bool(getattr(loss_cfg, "enable_auxiliary_terms", False))
+    temporal_similarity_loss = GraphTemporalSimilarityLoss() if enable_auxiliary_terms and similarity_coeff != 0.0 else None
+    inverse_dynamics_loss = None
+    if enable_auxiliary_terms and inverse_dynamics_coeff != 0.0:
+        inverse_dynamics_loss = GraphEncodedActionInverseDynamicsLoss(
+            GraphInverseDynamicsModel(
+                latent_dim=int(model_cfg.latent_dim),
+                action_dim=int(model_cfg.action_dim),
+                hidden_dim=int(model_cfg.action_encoder.hidden_dim),
+            )
+        )
     loss_module = GraphJEPALossModule(
         prediction_loss=GraphLatentPredictionLoss(
             graph_weight=float(loss_cfg.prediction.graph_weight),
@@ -153,10 +169,12 @@ def build_jepa(
             std_margin=float(loss_cfg.regularization.std_margin),
             target=str(loss_cfg.regularization.target),
         ),
+        temporal_similarity_loss=temporal_similarity_loss,
+        inverse_dynamics_loss=inverse_dynamics_loss,
         prediction_coeff=float(loss_cfg.prediction_coeff),
         regularization_coeff=float(loss_cfg.regularization_coeff),
-        similarity_coeff=float(loss_cfg.similarity_coeff),
-        inverse_dynamics_coeff=float(loss_cfg.inverse_dynamics_coeff),
+        similarity_coeff=similarity_coeff,
+        inverse_dynamics_coeff=inverse_dynamics_coeff,
         rollout_order_weights=None
         if loss_cfg.rollout_order_weights is None
         else [float(weight) for weight in loss_cfg.rollout_order_weights],

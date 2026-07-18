@@ -1,0 +1,9 @@
+model:
+  action_encoder:
+    kind: rnn
+
+tracking:
+  run_name: smoke_action_encoder_rnn_seed0
+  tags:
+    stage: smoke_component_test
+    hypothesis: "RNN action-argument composition improves ordered object-argument decoding after pooled encoder failures."

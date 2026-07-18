@@ -59,6 +59,9 @@ model:
     similarity_coeff: 0.1
     # Weight for encoded-action inverse dynamics loss; keep nonzero for tuning campaigns.
     inverse_dynamics_coeff: 0.1
+    # Backward-compatible switch for constructing auxiliary loss modules.
+    # Existing checkpoints were trained before these modules were wired.
+    enable_auxiliary_terms: false
     # Optional per-order weights for K-step prediction losses; null uses uniform weights.
     rollout_order_weights: null
 
@@ -102,6 +105,8 @@ optimizer:
     start_factor: 1.0e-8
 
 data:
+  # Optional problem-split seed. null reuses the CLI training seed.
+  split_seed: null
   # Number of trajectory-window examples per training/evaluation batch.
   batch_size: 24
   # Number of DataLoader worker processes.

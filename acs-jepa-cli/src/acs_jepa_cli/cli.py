@@ -107,7 +107,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         corpus,
         val_fraction=float(config.data.val_fraction),
         test_fraction=float(config.data.test_fraction),
-        seed=args.seed,
+        seed=args.seed if config.data.split_seed is None else int(config.data.split_seed),
     )
     if not splits.train.trajectories:
         raise ValueError("Training split is empty")

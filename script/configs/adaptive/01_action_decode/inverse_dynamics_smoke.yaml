@@ -1,0 +1,11 @@
+model:
+  loss:
+    enable_auxiliary_terms: true
+    similarity_coeff: 0.0
+    inverse_dynamics_coeff: 0.1
+
+tracking:
+  run_name: smoke_inverse_dynamics_seed0
+  tags:
+    stage: smoke_component_test
+    hypothesis: "Encoded-action inverse dynamics improves action-argument identifiability after baseline planning fails from invalid decoded arguments."

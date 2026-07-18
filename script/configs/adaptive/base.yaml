@@ -1,0 +1,11 @@
+data:
+  split_seed: 20260717
+  val_fraction: 0.2
+  test_fraction: 0.0
+
+tracking:
+  mlflow_tracking_uri: sqlite:////home/awalga/workspace/acs-jepa-mlflow.db
+  experiment_name: acs-jepa-adaptive-tuning-v1
+  tags:
+    campaign: citycar-adaptive-v1
+    split_id: citycar-20260717

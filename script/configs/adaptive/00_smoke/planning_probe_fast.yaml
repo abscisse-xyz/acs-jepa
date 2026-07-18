@@ -1,0 +1,21 @@
+planning:
+  # Bounded smoke diagnostic. The default planner can spend minutes in nested
+  # action-decoder CEM after an invalid decoded action. This probe measures
+  # whether the trained checkpoint can produce valid first actions at all.
+  horizon: 2
+  num_samples: 32
+  max_iters: 10
+  apply_steps: 1
+  max_total_actions: 16
+  max_decode_attempts: 1
+  action_pool_size: 128
+  action_decoder:
+    method: cem
+    num_samples: 64
+    max_iters: 8
+
+tracking:
+  run_name: smoke_default_seed0_plan_probe_fast
+  tags:
+    stage: smoke_planning_probe
+    hypothesis: "Bounded planner reveals first-action validity without rejection-penalty decode blowup."

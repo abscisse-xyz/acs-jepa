@@ -1,0 +1,16 @@
+planning:
+  # Bounded probe that optimizes typed grounded actions directly, bypassing the
+  # continuous-latent action decoder that failed with invalid arguments.
+  kind: structured_ce
+  horizon: 2
+  num_samples: 64
+  max_iters: 10
+  apply_steps: 1
+  max_total_actions: 16
+  max_decode_attempts: 1
+
+tracking:
+  run_name: smoke_default_seed0_plan_structured_probe_fast
+  tags:
+    stage: smoke_planning_probe
+    hypothesis: "Structured grounded-action CE avoids invalid latent-action decoding and tests planner behavior directly."
