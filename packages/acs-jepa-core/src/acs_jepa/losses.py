@@ -56,6 +56,101 @@ class GraphJEPALossOutput:
     terms: dict[str, Tensor]
 
 
+@dataclass(frozen=True)
+class ApplicabilityLossOutput:
+    """Scalar applicability BCE loss and diagnostic logit statistics."""
+
+    total: Tensor
+    bce: Tensor
+    positive_logit_mean: Tensor | None
+    negative_logit_mean: Tensor | None
+    positive_negative_margin: Tensor | None
+    num_examples: int
+    num_positive: int
+    num_negative: int
+
+
+class ApplicabilityLoss(nn.Module):
+    """Binary cross-entropy objective for applicability logits.
+
+    The module consumes precomputed logits and labels. It deliberately has no
+    dependency on action encoders, simulator oracles, or action enumeration.
+    """
+
+    def __init__(self, *, pos_weight: float | None = None) -> None:
+        super().__init__()
+        if pos_weight is not None and pos_weight <= 0.0:
+            raise ValueError("pos_weight must be positive")
+        self.pos_weight = None if pos_weight is None else float(pos_weight)
+
+    def forward(
+        self,
+        logits: Tensor,
+        labels: Tensor,
+        example_mask: Tensor | None = None,
+    ) -> ApplicabilityLossOutput:
+        """Compute BCE over effective labeled examples.
+
+        Args:
+            logits: Applicability logits shaped ``[N]``.
+            labels: Binary/probability labels shaped ``[N]`` with values in
+                ``[0, 1]``.
+            example_mask: Optional bool mask shaped ``[N]``. ``False`` rows are
+                excluded from loss/statistics and receive no gradient.
+
+        Returns:
+            Loss output with BCE and positive/negative logit diagnostics.
+        """
+
+        effective_logits, effective_labels = self._effective_examples(logits, labels, example_mask)
+        pos_weight = None
+        if self.pos_weight is not None:
+            pos_weight = effective_logits.new_tensor(self.pos_weight)
+        bce = F.binary_cross_entropy_with_logits(
+            effective_logits,
+            effective_labels.to(dtype=effective_logits.dtype),
+            pos_weight=pos_weight,
+        )
+        positive_mask = effective_labels >= 0.5
+        negative_mask = ~positive_mask
+        positive_mean = effective_logits[positive_mask].mean() if positive_mask.any() else None
+        negative_mean = effective_logits[negative_mask].mean() if negative_mask.any() else None
+        margin = positive_mean - negative_mean if positive_mean is not None and negative_mean is not None else None
+        return ApplicabilityLossOutput(
+            total=bce,
+            bce=bce,
+            positive_logit_mean=positive_mean,
+            negative_logit_mean=negative_mean,
+            positive_negative_margin=margin,
+            num_examples=int(effective_logits.numel()),
+            num_positive=int(positive_mask.sum().item()),
+            num_negative=int(negative_mask.sum().item()),
+        )
+
+    @staticmethod
+    def _effective_examples(logits: Tensor, labels: Tensor, example_mask: Tensor | None) -> tuple[Tensor, Tensor]:
+        if logits.ndim != 1:
+            raise ValueError("logits must have shape [N]")
+        if labels.ndim != 1:
+            raise ValueError("labels must have shape [N]")
+        if logits.shape != labels.shape:
+            raise ValueError("logits and labels must have the same shape")
+        if example_mask is not None:
+            if example_mask.ndim != 1:
+                raise ValueError("example_mask must have shape [N]")
+            if example_mask.shape != logits.shape:
+                raise ValueError("example_mask and logits must have the same shape")
+            if example_mask.dtype != torch.bool:
+                raise ValueError("example_mask must be bool")
+            logits = logits[example_mask]
+            labels = labels[example_mask]
+        if logits.numel() == 0:
+            raise ValueError("ApplicabilityLoss received an empty effective batch")
+        if torch.any((labels < 0) | (labels > 1)):
+            raise ValueError("labels must lie in [0, 1]")
+        return logits, labels
+
+
 class GraphLatentPredictionLoss(nn.Module):
     """Prediction loss between predicted and target graph/object latents.
 
@@ -353,7 +448,9 @@ class GraphJEPALossModule(nn.Module):
             not rollout_order_weights or any(float(weight) < 0.0 for weight in rollout_order_weights)
         ):
             raise ValueError("rollout_order_weights must be a non-empty sequence of non-negative weights")
-        self.rollout_order_weights = None if rollout_order_weights is None else tuple(float(w) for w in rollout_order_weights)
+        self.rollout_order_weights = (
+            None if rollout_order_weights is None else tuple(float(w) for w in rollout_order_weights)
+        )
 
     def forward(
         self,
@@ -426,7 +523,10 @@ class GraphJEPALossModule(nn.Module):
         similarity = None
         if self.temporal_similarity_loss is not None and self.similarity_coeff != 0:
             order_one = predicted_states_by_order[1]
-            similarity = self.temporal_similarity_loss(latent_time_slice(observed_states, 0, observed_len - 1), order_one)
+            similarity = self.temporal_similarity_loss(
+                latent_time_slice(observed_states, 0, observed_len - 1),
+                order_one,
+            )
             terms["similarity"] = similarity
             total = total + self.similarity_coeff * similarity
 

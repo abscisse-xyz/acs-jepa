@@ -31,6 +31,8 @@ from acs_jepa.goals import (
 )
 from acs_jepa.jepa import GraphJEPA, GraphJEPATrainingOutput
 from acs_jepa.losses import (
+    ApplicabilityLoss,
+    ApplicabilityLossOutput,
     CovarianceLoss,
     GraphEncodedActionInverseDynamicsLoss,
     GraphInverseDynamicsModel,
@@ -72,6 +74,8 @@ from acs_jepa.training import JepaTrainer, JepaTrainerConfig, JepaTrainerStepOut
 __all__ = [
     "ActionEncoder",
     "ApplicabilityHead",
+    "ApplicabilityLoss",
+    "ApplicabilityLossOutput",
     "ConditionalSampleGeneratorLoss",
     "ConditionalSampleTerminalLatentGeneratorG",
     "ContinuousGMMMPPI",
