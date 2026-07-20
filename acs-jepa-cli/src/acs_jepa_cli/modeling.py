@@ -8,6 +8,9 @@ from typing import Any
 import torch
 import torch.nn as nn
 from acs_jepa import (
+    ActionEncoder,
+    ApplicabilityHead,
+    ApplicabilityLoss,
     ConditionalSampleTerminalLatentGeneratorG,
     DiagonalGaussianTerminalLatentDistributionP,
     GaussianMixtureTerminalLatentDistributionP,
@@ -21,7 +24,6 @@ from acs_jepa import (
     JepaTrainer,
     JepaTrainerConfig,
     PredicateEvaluator,
-    ActionEncoder,
     StateEncoderF,
     build_action_encoder,
     build_latent_predictor,
@@ -51,6 +53,8 @@ class ModelBundle:
     scheduler: NoOpScheduler | WarmupCosineScheduler | None
     trainer: JepaTrainer
     goal_head: nn.Module | None
+    applicability_head: nn.Module | None
+    applicability_loss_module: nn.Module | None
     vocab_sizes: VocabSizes
 
 
@@ -66,10 +70,15 @@ def build_model_bundle(
 
     resolved_vocab = compute_vocab_sizes(parsed_problems) if vocab_sizes is None else vocab_sizes
     jepa, goal_head = build_jepa(parsed_problems, config, vocab_sizes=resolved_vocab)
+    applicability_head = build_applicability_head(resolved_vocab, config)
+    applicability_loss_module = build_applicability_loss_module(config)
+    _validate_applicability_config(applicability_head, config)
     jepa.to(device)
     if goal_head is not None:
         goal_head.to(device)
-    optimizer = build_optimizer([jepa, goal_head], config)
+    if applicability_head is not None:
+        applicability_head.to(device)
+    optimizer = build_optimizer([jepa, goal_head, applicability_head], config)
     scheduler = None if total_steps is None else build_scheduler(optimizer, config, total_steps=total_steps)
     trainer = JepaTrainer(
         jepa=jepa,
@@ -79,11 +88,15 @@ def build_model_bundle(
             jepa_loss_weight=float(config.trainer.jepa_loss_weight),
             goal_loss_weight=float(config.trainer.goal_loss_weight),
             goal_head_detach=bool(config.trainer.goal_head_detach),
+            applicability_loss_weight=float(config.trainer.applicability_loss_weight),
+            applicability_head_detach=bool(config.trainer.applicability_head_detach),
             grad_clip_norm=None
             if config.trainer.grad_clip_norm is None
             else float(config.trainer.grad_clip_norm),
         ),
         goal_head=goal_head,
+        applicability_head=applicability_head,
+        applicability_loss_module=applicability_loss_module,
     )
     return ModelBundle(
         jepa=jepa,
@@ -91,6 +104,8 @@ def build_model_bundle(
         scheduler=scheduler,
         trainer=trainer,
         goal_head=goal_head,
+        applicability_head=applicability_head,
+        applicability_loss_module=applicability_loss_module,
         vocab_sizes=resolved_vocab,
     )
 
@@ -148,7 +163,9 @@ def build_jepa(
     similarity_coeff = float(loss_cfg.similarity_coeff)
     inverse_dynamics_coeff = float(loss_cfg.inverse_dynamics_coeff)
     enable_auxiliary_terms = bool(getattr(loss_cfg, "enable_auxiliary_terms", False))
-    temporal_similarity_loss = GraphTemporalSimilarityLoss() if enable_auxiliary_terms and similarity_coeff != 0.0 else None
+    temporal_similarity_loss = (
+        GraphTemporalSimilarityLoss() if enable_auxiliary_terms and similarity_coeff != 0.0 else None
+    )
     inverse_dynamics_loss = None
     if enable_auxiliary_terms and inverse_dynamics_coeff != 0.0:
         inverse_dynamics_loss = GraphEncodedActionInverseDynamicsLoss(
@@ -223,6 +240,40 @@ def build_goal_head(vocab: VocabSizes, config: DictConfig) -> nn.Module | None:
             num_samples=int(goal_cfg.num_samples),
         )
     raise ValueError(f"Unknown goal head kind: {kind}")
+
+
+def build_applicability_head(vocab: VocabSizes, config: DictConfig) -> nn.Module | None:
+    """Build the configured auxiliary applicability head."""
+
+    head_cfg = config.model.applicability_head
+    kind = str(head_cfg.kind)
+    if kind == "none":
+        return None
+    if kind == "mlp":
+        return ApplicabilityHead(
+            latent_dim=int(config.model.latent_dim),
+            action_dim=int(config.model.action_dim),
+            max_action_arity=vocab.max_action_arity,
+            hidden_dim=int(head_cfg.hidden_dim),
+            dropout=float(head_cfg.dropout),
+        )
+    raise ValueError(f"Unknown applicability head kind: {kind}")
+
+
+def build_applicability_loss_module(config: DictConfig) -> ApplicabilityLoss | None:
+    """Build the auxiliary applicability BCE loss when configured."""
+
+    pos_weight = config.trainer.applicability_pos_weight
+    if pos_weight is not None and float(pos_weight) <= 0.0:
+        raise ValueError("applicability_pos_weight must be positive when provided")
+    if str(config.model.applicability_head.kind) == "none":
+        return None
+    return ApplicabilityLoss(pos_weight=None if pos_weight is None else float(pos_weight))
+
+
+def _validate_applicability_config(applicability_head: nn.Module | None, config: DictConfig) -> None:
+    if float(config.trainer.applicability_loss_weight) > 0.0 and applicability_head is None:
+        raise ValueError("applicability_loss_weight > 0 requires model.applicability_head.kind != 'none'")
 
 
 def build_optimizer(modules: list[nn.Module | None], config: DictConfig) -> torch.optim.Optimizer:

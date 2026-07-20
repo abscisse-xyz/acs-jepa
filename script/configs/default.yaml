@@ -77,6 +77,14 @@ model:
     # Number of generated samples when kind is conditional_sampler.
     num_samples: 4
 
+  applicability_head:
+    # Optional experimental auxiliary applicability head: none or mlp.
+    kind: none
+    # Hidden width inside the applicability head.
+    hidden_dim: 64
+    # Dropout probability inside the applicability head MLP.
+    dropout: 0.0
+
 trainer:
   # Multiplier for the core JEPA loss before adding auxiliary goal loss.
   jepa_loss_weight: 1.0
@@ -84,6 +92,12 @@ trainer:
   goal_loss_weight: 1.0
   # true trains the goal head on detached target latents; false lets gradients flow into JEPA.
   goal_head_detach: true
+  # Multiplier for auxiliary applicability BCE loss. Requires applicability batch keys when > 0.
+  applicability_loss_weight: 0.0
+  # true trains the applicability head on detached supplied latents; false permits gradients through graph-attached tensors.
+  applicability_head_detach: true
+  # Positive scalar class weight for positive applicability labels, or null for unweighted BCE.
+  applicability_pos_weight: null
   # Positive global gradient-norm clip value, or null to disable clipping.
   grad_clip_norm: null
 
