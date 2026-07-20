@@ -2,6 +2,7 @@
 
 from acs_jepa.architectures import (
     ActionEncoder,
+    ApplicabilityHead,
     GraphStateProjector,
     GRULatentPredictorG,
     JEPALatentState,
@@ -70,6 +71,7 @@ from acs_jepa.training import JepaTrainer, JepaTrainerConfig, JepaTrainerStepOut
 
 __all__ = [
     "ActionEncoder",
+    "ApplicabilityHead",
     "ConditionalSampleGeneratorLoss",
     "ConditionalSampleTerminalLatentGeneratorG",
     "ContinuousGMMMPPI",

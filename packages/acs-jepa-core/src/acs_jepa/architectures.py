@@ -474,6 +474,120 @@ class LatentActionEncoder(nn.Module):
         return self.argument_encoder(action_features, arg_features, role_ids, arg_mask)
 
 
+class ApplicabilityHead(nn.Module):
+    """Score whether a grounded action is applicable in a latent state.
+
+    The head consumes an already encoded action latent and the current graph
+    latent. Optional argument object latents are summarized with learned slot
+    embeddings so object context is role/order-aware rather than a plain
+    permutation-invariant masked mean.
+    """
+
+    def __init__(
+        self,
+        *,
+        latent_dim: int,
+        action_dim: int,
+        max_action_arity: int,
+        hidden_dim: int | None = None,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if latent_dim <= 0:
+            raise ValueError("latent_dim must be positive")
+        if action_dim <= 0:
+            raise ValueError("action_dim must be positive")
+        if max_action_arity < 0:
+            raise ValueError("max_action_arity must be non-negative")
+        if not (0.0 <= dropout < 1.0):
+            raise ValueError("dropout must lie in [0, 1)")
+        hidden_dim = max(latent_dim + action_dim, latent_dim) if hidden_dim is None else hidden_dim
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive")
+        self.latent_dim = int(latent_dim)
+        self.action_dim = int(action_dim)
+        self.max_action_arity = int(max_action_arity)
+        self.slot_embedding = nn.Embedding(max(1, max_action_arity), latent_dim)
+        self.object_context = _mlp(latent_dim * 3, hidden_dim, latent_dim)
+        self.scorer = nn.Sequential(
+            nn.Linear(latent_dim * 3 + action_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(
+        self,
+        graph_latent: Tensor,
+        action_latent: Tensor,
+        object_latents: Tensor | None = None,
+        argument_mask: Tensor | None = None,
+    ) -> Tensor:
+        """Return one applicability logit per graph/action pair."""
+
+        self._validate_state_action(graph_latent, action_latent)
+        object_summary = self._object_summary(graph_latent, object_latents, argument_mask)
+        features = torch.cat(
+            [
+                graph_latent,
+                action_latent,
+                object_summary,
+                (graph_latent - object_summary).abs(),
+            ],
+            dim=-1,
+        )
+        return self.scorer(features).squeeze(-1)
+
+    def _validate_state_action(self, graph_latent: Tensor, action_latent: Tensor) -> None:
+        if graph_latent.ndim != 2:
+            raise ValueError("graph_latent must have shape [B, latent_dim]")
+        if action_latent.ndim != 2:
+            raise ValueError("action_latent must have shape [B, action_dim]")
+        if graph_latent.size(0) != action_latent.size(0):
+            raise ValueError("graph_latent and action_latent batch size must match")
+        if graph_latent.size(-1) != self.latent_dim:
+            raise ValueError("graph_latent last dimension must match latent_dim")
+        if action_latent.size(-1) != self.action_dim:
+            raise ValueError("action_latent last dimension must match action_dim")
+
+    def _object_summary(
+        self,
+        graph_latent: Tensor,
+        object_latents: Tensor | None,
+        argument_mask: Tensor | None,
+    ) -> Tensor:
+        if object_latents is None and argument_mask is None:
+            return graph_latent.new_zeros((graph_latent.size(0), self.latent_dim))
+        if object_latents is None:
+            raise ValueError("object_latents is required when argument_mask is provided")
+        if argument_mask is None:
+            raise ValueError("argument_mask is required when object_latents is provided")
+        if object_latents.ndim != 3:
+            raise ValueError("object_latents must have shape [B, A, latent_dim]")
+        if argument_mask.ndim != 2:
+            raise ValueError("argument_mask must have shape [B, A]")
+        if object_latents.size(0) != graph_latent.size(0):
+            raise ValueError("object_latents and graph_latent batch size must match")
+        if object_latents.size(-1) != self.latent_dim:
+            raise ValueError("object_latents last dimension must match latent_dim")
+        if argument_mask.shape != object_latents.shape[:2]:
+            raise ValueError("object/mask arity dimensions must match")
+        if object_latents.size(1) > self.max_action_arity:
+            raise ValueError("object/mask arity exceeds max_action_arity")
+        mask = argument_mask.to(device=object_latents.device, dtype=object_latents.dtype).unsqueeze(-1)
+        arity = object_latents.size(1)
+        slot_ids = torch.arange(arity, device=object_latents.device)
+        slot_features = self.slot_embedding(slot_ids).to(dtype=object_latents.dtype).unsqueeze(0)
+        slot_features = slot_features.expand(object_latents.size(0), -1, -1)
+        role_object_features = torch.cat(
+            [object_latents, slot_features, object_latents * torch.tanh(slot_features)],
+            dim=-1,
+        )
+        projected = self.object_context(role_object_features) * mask
+        counts = mask.sum(dim=1).clamp_min(1.0)
+        return projected.sum(dim=1) / counts
+
+
 @dataclass(frozen=True)
 class ActionDecodingSpace:
     """Finite grounding space for action latent decoding.
