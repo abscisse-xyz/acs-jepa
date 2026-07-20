@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -246,9 +247,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     )
     vocab_sizes = vocab_sizes_from_dict(checkpoint["vocab_sizes"])
     bundle = build_model_bundle(corpus.parsed_problems, config, device=device, vocab_sizes=vocab_sizes)
-    bundle.jepa.load_state_dict(checkpoint["model_state_dict"])
-    if bundle.goal_head is not None and checkpoint.get("goal_head_state_dict") is not None:
-        bundle.goal_head.load_state_dict(checkpoint["goal_head_state_dict"])
+    _load_checkpoint_state(bundle, checkpoint)
 
     configure_mlflow(config)
     metrics = _evaluate(bundle.trainer, loader, device)
@@ -294,12 +293,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
     parsed_problem = parse_domain_problem(args.domain, args.problem)
     vocab_sizes = vocab_sizes_from_dict(checkpoint["vocab_sizes"])
     bundle = build_model_bundle((parsed_problem,), config, device=device, vocab_sizes=vocab_sizes)
-    bundle.jepa.load_state_dict(checkpoint["model_state_dict"])
-    if bundle.goal_head is not None and checkpoint.get("goal_head_state_dict") is not None:
-        bundle.goal_head.load_state_dict(checkpoint["goal_head_state_dict"])
+    _load_checkpoint_state(bundle, checkpoint)
     bundle.jepa.eval()
     if bundle.goal_head is not None:
         bundle.goal_head.eval()
+    if bundle.applicability_head is not None:
+        bundle.applicability_head.eval()
 
     goal_tensors = tensorize_goal_atoms(
         parsed_problem,
@@ -630,12 +629,32 @@ def _evaluate(trainer: Any, loader: Iterable[Any], device: torch.device) -> dict
     return {key: value / count for key, value in sorted(totals.items())}
 
 
+def _load_checkpoint_state(bundle: Any, checkpoint: dict[str, Any]) -> None:
+    bundle.jepa.load_state_dict(checkpoint["model_state_dict"])
+    if bundle.goal_head is not None and checkpoint.get("goal_head_state_dict") is not None:
+        bundle.goal_head.load_state_dict(checkpoint["goal_head_state_dict"])
+    applicability_state = checkpoint.get("applicability_head_state_dict")
+    if bundle.applicability_head is None:
+        return
+    if applicability_state is None:
+        warnings.warn(
+            "Checkpoint does not contain applicability_head_state_dict; leaving applicability head initialized",
+            UserWarning,
+            stacklevel=2,
+        )
+        return
+    bundle.applicability_head.load_state_dict(applicability_state)
+
+
 def _save_checkpoint(path: Path, bundle: Any, config: Any, epoch: int, step: int, best_eval: float) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "model_state_dict": bundle.jepa.state_dict(),
             "goal_head_state_dict": None if bundle.goal_head is None else bundle.goal_head.state_dict(),
+            "applicability_head_state_dict": (
+                None if bundle.applicability_head is None else bundle.applicability_head.state_dict()
+            ),
             "optimizer_state_dict": bundle.optimizer.state_dict(),
             "scheduler_state_dict": None if bundle.scheduler is None else bundle.scheduler.state_dict(),
             "config": config_to_container(config),

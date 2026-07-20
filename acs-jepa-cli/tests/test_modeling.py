@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import acs_jepa_cli.cli as cli
 import pytest
 import torch
 from acs_jepa import ApplicabilityHead, ApplicabilityLoss
@@ -156,6 +158,113 @@ trainer:
 
     with pytest.raises(ValueError, match="applicability_loss_weight > 0 requires"):
         build_model_bundle((parsed,), config, device=torch.device("cpu"))
+
+
+def test_checkpoint_saves_and_restores_applicability_head_state(tmp_path: Path) -> None:
+    parsed = _parsed_problem(tmp_path)
+    config = _load_small_config(
+        tmp_path,
+        extra="""
+model:
+  applicability_head:
+    kind: mlp
+trainer:
+  applicability_loss_weight: 0.5
+""",
+    )
+    bundle = build_model_bundle((parsed,), config, device=torch.device("cpu"))
+    checkpoint_path = tmp_path / "checkpoint.pt"
+
+    cli._save_checkpoint(checkpoint_path, bundle, config, epoch=0, step=3, best_eval=1.5)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+    assert checkpoint["applicability_head_state_dict"] is not None
+    assert checkpoint["applicability_head_state_dict"].keys() == bundle.applicability_head.state_dict().keys()
+
+    restored = build_model_bundle((parsed,), config, device=torch.device("cpu"))
+    with torch.no_grad():
+        for parameter in restored.applicability_head.parameters():
+            parameter.add_(10.0)
+
+    cli._load_checkpoint_state(restored, checkpoint)
+
+    for name, value in bundle.applicability_head.state_dict().items():
+        assert torch.allclose(value, restored.applicability_head.state_dict()[name])
+
+
+def test_checkpoint_saves_disabled_applicability_state_as_none(tmp_path: Path) -> None:
+    parsed = _parsed_problem(tmp_path)
+    config = _load_small_config(tmp_path)
+    bundle = build_model_bundle((parsed,), config, device=torch.device("cpu"))
+    checkpoint_path = tmp_path / "checkpoint.pt"
+
+    cli._save_checkpoint(checkpoint_path, bundle, config, epoch=0, step=3, best_eval=1.5)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+    assert checkpoint["applicability_head_state_dict"] is None
+
+
+def test_checkpoint_loader_warns_but_allows_old_missing_applicability_state(tmp_path: Path) -> None:
+    parsed = _parsed_problem(tmp_path)
+    config = _load_small_config(
+        tmp_path,
+        extra="""
+model:
+  applicability_head:
+    kind: mlp
+trainer:
+  applicability_loss_weight: 0.5
+""",
+    )
+    bundle = build_model_bundle((parsed,), config, device=torch.device("cpu"))
+    checkpoint = {
+        "model_state_dict": bundle.jepa.state_dict(),
+        "goal_head_state_dict": bundle.goal_head.state_dict(),
+    }
+
+    with pytest.warns(UserWarning, match="applicability_head_state_dict"):
+        cli._load_checkpoint_state(bundle, checkpoint)
+
+
+def test_cmd_eval_routes_checkpoint_loading_through_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    output_dir = tmp_path / "eval"
+    checkpoint = {
+        "config": {},
+        "vocab_sizes": {
+            "num_types": 1,
+            "num_predicates": 1,
+            "num_objects": 1,
+            "num_actions": 1,
+            "max_arity": 1,
+            "max_action_arity": 1,
+            "max_predicate_arity": 1,
+        },
+    }
+    calls: list[object] = []
+    fake_bundle = SimpleNamespace(trainer=object())
+    fake_corpus = SimpleNamespace(parsed_problems=(), trajectories=(), records=())
+
+    checkpoint_path.write_bytes(b"placeholder")
+    monkeypatch.setattr(cli.torch, "load", lambda *args, **kwargs: checkpoint)
+    monkeypatch.setattr(cli, "save_resolved_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "load_corpus", lambda *args, **kwargs: fake_corpus)
+    monkeypatch.setattr(cli, "make_torch_dataset", lambda *args, **kwargs: [object()])
+    monkeypatch.setattr(cli, "build_model_bundle", lambda *args, **kwargs: fake_bundle)
+    monkeypatch.setattr(cli, "_load_checkpoint_state", lambda bundle, loaded: calls.append((bundle, loaded)))
+    monkeypatch.setattr(cli, "_evaluate", lambda *args, **kwargs: {"total_loss": 1.0})
+    monkeypatch.setattr(cli, "_runtime_metrics", lambda *args, **kwargs: {"seconds": 1.0})
+    monkeypatch.setattr(cli, "configure_mlflow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "log_config_params", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "log_metrics", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "corpus_summary", lambda *args, **kwargs: {})
+    monkeypatch.setattr(cli.mlflow, "log_artifact", lambda *args, **kwargs: None)
+
+    assert cli.cmd_eval(
+        SimpleNamespace(dataset_dirs=[tmp_path], checkpoint=checkpoint_path, output=output_dir, device="cpu")
+    ) == 0
+
+    assert calls == [(fake_bundle, checkpoint)]
 
 
 def _parsed_problem(tmp_path: Path):
