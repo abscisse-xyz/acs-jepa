@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 from acs_jepa import (
+    ApplicabilityHead,
+    ApplicabilityLoss,
     ConditionalSampleTerminalLatentGeneratorG,
     DiagonalGaussianTerminalLatentDistributionP,
     GaussianMixtureTerminalLatentDistributionP,
@@ -13,9 +16,9 @@ from acs_jepa import (
 )
 from acs_jepa.architectures import ActionEncoder, LatentActionEncoder, ResidualMLPLatentPredictorG, StateEncoderF
 from acs_jepa.graph import (
+    GraphEncoder,
     GroundAction,
     PDDLAtomTrajectoryDataset,
-    GraphEncoder,
     TrajectorySample,
     parse_domain_problem,
 )
@@ -215,6 +218,108 @@ def test_jepa_trainer_runs_conditional_sampler_goal_step(tmp_path: Path) -> None
     assert _has_nonzero_grad(generator)
 
 
+def test_jepa_trainer_applicability_disabled_preserves_jepa_only_behavior(tmp_path: Path) -> None:
+    parsed, batch = _trainer_batch(tmp_path)
+    jepa = _build_graph_jepa(parsed)
+    head = ApplicabilityHead(latent_dim=6, action_dim=6, max_action_arity=parsed.max_action_arity, hidden_dim=8)
+    trainer = JepaTrainer(
+        jepa=jepa,
+        optimizer=torch.optim.Adam([*jepa.parameters(), *head.parameters()], lr=0.001),
+        config=JepaTrainerConfig(applicability_loss_weight=0.0),
+        applicability_head=head,
+        applicability_loss_module=ApplicabilityLoss(),
+    )
+
+    output = trainer.train_step(batch)
+
+    assert output.applicability_loss is None
+    assert "applicability" not in output.terms
+    assert torch.isfinite(output.total_loss)
+
+
+def test_jepa_trainer_applicability_loss_adds_detached_auxiliary_terms(tmp_path: Path) -> None:
+    parsed, batch = _trainer_batch(tmp_path)
+    batch.update(_applicability_batch(requires_grad=True))
+    jepa = _build_graph_jepa(parsed)
+    head = ApplicabilityHead(latent_dim=6, action_dim=6, max_action_arity=4, hidden_dim=8)
+    loss_module = ApplicabilityLoss()
+    trainer = JepaTrainer(
+        jepa=jepa,
+        optimizer=torch.optim.Adam([*jepa.parameters(), *head.parameters()], lr=0.001),
+        config=JepaTrainerConfig(jepa_loss_weight=0.0, applicability_loss_weight=2.0),
+        applicability_head=head,
+        applicability_loss_module=loss_module,
+    )
+
+    output = trainer.train_step(batch)
+
+    assert output.goal_loss is None
+    assert output.applicability_loss is not None
+    assert torch.allclose(output.total_loss, 2.0 * output.applicability_loss)
+    assert "applicability" in output.terms
+    assert "applicability_bce" in output.terms
+    assert "applicability_positive_logit_mean" in output.terms
+    assert "applicability_negative_logit_mean" in output.terms
+    assert "applicability_positive_negative_margin" in output.terms
+    assert all(not value.requires_grad for value in output.terms.values())
+    assert _has_nonzero_grad(head)
+    assert batch["applicability_graph_latents"].grad is None
+    assert batch["applicability_action_latents"].grad is None
+    assert batch["applicability_object_latents"].grad is None
+
+
+def test_jepa_trainer_applicability_loss_can_backpropagate_to_attached_inputs(tmp_path: Path) -> None:
+    parsed, batch = _trainer_batch(tmp_path)
+    batch.update(_applicability_batch(requires_grad=True))
+    jepa = _build_graph_jepa(parsed)
+    head = ApplicabilityHead(latent_dim=6, action_dim=6, max_action_arity=4, hidden_dim=8)
+    trainer = JepaTrainer(
+        jepa=jepa,
+        optimizer=torch.optim.Adam([*jepa.parameters(), *head.parameters()], lr=0.001),
+        config=JepaTrainerConfig(
+            jepa_loss_weight=0.0,
+            applicability_loss_weight=1.0,
+            applicability_head_detach=False,
+        ),
+        applicability_head=head,
+        applicability_loss_module=ApplicabilityLoss(),
+    )
+
+    output = trainer.train_step(batch)
+
+    assert output.applicability_loss is not None
+    assert batch["applicability_graph_latents"].grad is not None
+    assert batch["applicability_action_latents"].grad is not None
+    assert batch["applicability_object_latents"].grad is not None
+
+
+def test_jepa_trainer_applicability_validation_and_required_keys(tmp_path: Path) -> None:
+    parsed, batch = _trainer_batch(tmp_path)
+    jepa = _build_graph_jepa(parsed)
+    head = ApplicabilityHead(latent_dim=6, action_dim=6, max_action_arity=4, hidden_dim=8)
+    with pytest.raises(ValueError, match="applicability_loss_weight must be non-negative"):
+        JepaTrainer(
+            jepa=jepa,
+            optimizer=torch.optim.Adam(jepa.parameters()),
+            config=JepaTrainerConfig(applicability_loss_weight=-1.0),
+        )
+    with pytest.raises(ValueError, match="applicability_head and applicability_loss_module are required"):
+        JepaTrainer(
+            jepa=jepa,
+            optimizer=torch.optim.Adam(jepa.parameters()),
+            config=JepaTrainerConfig(applicability_loss_weight=1.0),
+        )
+    trainer = JepaTrainer(
+        jepa=jepa,
+        optimizer=torch.optim.Adam([*jepa.parameters(), *head.parameters()], lr=0.001),
+        config=JepaTrainerConfig(jepa_loss_weight=0.0, applicability_loss_weight=1.0),
+        applicability_head=head,
+        applicability_loss_module=ApplicabilityLoss(),
+    )
+    with pytest.raises(KeyError, match="applicability_graph_latents"):
+        trainer.train_step(batch)
+
+
 def _trainer_batch(tmp_path: Path):
     domain_path = tmp_path / "domain.pddl"
     problem_path = tmp_path / "problem.pddl"
@@ -237,6 +342,19 @@ def _trainer_batch(tmp_path: Path):
         seed=5,
     )
     return parsed, next(iter(DataLoader(dataset, batch_size=1)))
+
+
+def _applicability_batch(*, requires_grad: bool) -> dict[str, torch.Tensor]:
+    return {
+        "applicability_graph_latents": torch.randn(3, 6, requires_grad=requires_grad),
+        "applicability_action_latents": torch.randn(3, 6, requires_grad=requires_grad),
+        "applicability_object_latents": torch.randn(3, 4, 6, requires_grad=requires_grad),
+        "applicability_argument_mask": torch.tensor(
+            [[True, True, False, False], [True, False, True, False], [True, True, True, False]]
+        ),
+        "applicability_labels": torch.tensor([1.0, 0.0, 1.0]),
+        "applicability_example_mask": torch.tensor([True, True, True]),
+    }
 
 
 def _build_graph_jepa(parsed) -> GraphJEPA:
