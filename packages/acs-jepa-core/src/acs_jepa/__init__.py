@@ -3,6 +3,7 @@
 from acs_jepa.architectures import (
     ActionEncoder,
     ApplicabilityHead,
+    ArgumentReconstructionHead,
     GraphStateProjector,
     GRULatentPredictorG,
     JEPALatentState,
@@ -84,6 +85,7 @@ __all__ = [
     "ApplicabilityHead",
     "ApplicabilityLoss",
     "ApplicabilityLossOutput",
+    "ArgumentReconstructionHead",
     "ConditionalSampleGeneratorLoss",
     "ConditionalSampleTerminalLatentGeneratorG",
     "ContinuousGMMMPPI",

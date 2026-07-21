@@ -474,6 +474,100 @@ class LatentActionEncoder(nn.Module):
         return self.argument_encoder(action_features, arg_features, role_ids, arg_mask)
 
 
+class ArgumentReconstructionHead(nn.Module):
+    """Score problem-local candidate objects for each action-argument role.
+
+    Candidate objects are scored independently with shared parameters, making
+    the object axis permutation-equivariant. Learned role embeddings preserve
+    argument order. A role-specific mask can exclude type-invalid or padded
+    candidates; inactive roles may have every candidate masked.
+    """
+
+    def __init__(
+        self,
+        *,
+        action_dim: int,
+        object_dim: int,
+        max_action_arity: int,
+        hidden_dim: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if action_dim <= 0:
+            raise ValueError("action_dim must be positive")
+        if object_dim <= 0:
+            raise ValueError("object_dim must be positive")
+        if max_action_arity <= 0:
+            raise ValueError("max_action_arity must be positive")
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive")
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError("dropout must lie in [0, 1)")
+        self.action_dim = int(action_dim)
+        self.object_dim = int(object_dim)
+        self.max_action_arity = int(max_action_arity)
+        self.action_projection = nn.Linear(action_dim, hidden_dim)
+        self.object_projection = nn.Linear(object_dim, hidden_dim)
+        self.role_embedding = nn.Embedding(max_action_arity, hidden_dim)
+        self.scorer = nn.Sequential(
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(
+        self,
+        action_latents: Tensor,
+        candidate_object_latents: Tensor,
+        candidate_mask: Tensor | None = None,
+    ) -> Tensor:
+        """Return candidate logits shaped ``[B, max_action_arity, O]``."""
+
+        if action_latents.ndim != 2:
+            raise ValueError("action_latents must have shape [B, action_dim]")
+        if candidate_object_latents.ndim != 3:
+            raise ValueError("candidate_object_latents must have shape [B, O, object_dim]")
+        if (
+            action_latents.size(0) == 0
+            or candidate_object_latents.size(1) == 0
+            or action_latents.size(0) != candidate_object_latents.size(0)
+            or action_latents.size(1) != self.action_dim
+            or candidate_object_latents.size(2) != self.object_dim
+        ):
+            raise ValueError("latent shapes must have matching non-empty B, O, and configured dimensions")
+        if not torch.is_floating_point(action_latents) or not torch.is_floating_point(
+            candidate_object_latents
+        ):
+            raise ValueError("action and candidate object latents must be floating point")
+        if action_latents.dtype != candidate_object_latents.dtype:
+            raise ValueError("action and candidate object latents must have the same dtype")
+        if action_latents.device != candidate_object_latents.device:
+            raise ValueError("action and candidate object latents must be on the same device")
+        if not bool(torch.isfinite(action_latents).all().item()) or not bool(
+            torch.isfinite(candidate_object_latents).all().item()
+        ):
+            raise ValueError("action and candidate object latents must contain only finite values")
+        if candidate_mask is not None:
+            if candidate_mask.dtype != torch.bool:
+                raise ValueError("candidate_mask must have bool dtype")
+            expected_mask_shape = (
+                action_latents.size(0),
+                self.max_action_arity,
+                candidate_object_latents.size(1),
+            )
+            if candidate_mask.shape != expected_mask_shape:
+                raise ValueError("candidate_mask shape must be [B, max_action_arity, O]")
+            if candidate_mask.device != action_latents.device:
+                raise ValueError("candidate_mask must be on the latent device")
+        action_features = self.action_projection(action_latents)[:, None, None, :]
+        object_features = self.object_projection(candidate_object_latents)[:, None, :, :]
+        role_features = self.role_embedding.weight[None, :, None, :]
+        logits = self.scorer(action_features + object_features + role_features).squeeze(-1)
+        if candidate_mask is not None:
+            logits = logits.masked_fill(~candidate_mask, float("-inf"))
+        return logits
+
+
 class ApplicabilityHead(nn.Module):
     """Score whether a grounded action is applicable in a latent state.
 
