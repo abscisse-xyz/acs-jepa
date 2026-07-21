@@ -176,6 +176,53 @@ def test_reference_same_schema_margins_report_true_action_to_nearest_wrong() -> 
     assert result["details"][0]["reference_action"] == ["move", ["car0", "j0"]]
 
 
+def test_diagnostic_reference_margins_add_scale_robust_unit_l2_without_changing_raw() -> None:
+    stats = _stats_module()
+    diagnostic = _load_module(DIAG_PATH, "diagnose_action_latent_statistics_unit")
+    latents = torch.tensor([[3.0, 0.0], [0.0, 4.0]])
+    schema_ids = ["move", "move"]
+    action_keys = [("move", ("a",)), ("move", ("b",))]
+    reference_mask = [True, False]
+    group_ids = ["t0", "t0"]
+
+    expected_raw = stats.reference_same_schema_margins(
+        latents, schema_ids, action_keys, reference_mask, group_ids
+    )
+    result = diagnostic._reference_same_schema_margin_metrics(
+        latents, schema_ids, action_keys, reference_mask, group_ids
+    )
+
+    assert {key: result[key] for key in expected_raw} == expected_raw
+    assert result["unit_l2"]["nearest_wrong_distance_min"] == pytest.approx(2**0.5)
+
+
+def test_diagnostic_reference_unit_l2_is_finite_for_zero_norm_latents() -> None:
+    diagnostic = _load_module(DIAG_PATH, "diagnose_action_latent_statistics_zero")
+
+    result = diagnostic._reference_same_schema_margin_metrics(
+        torch.tensor([[0.0, 0.0], [3.0, 4.0]]),
+        ["move", "move"],
+        [("move", ("a",)), ("move", ("b",))],
+        [True, False],
+        ["t0", "t0"],
+    )
+
+    assert result["unit_l2"]["nearest_wrong_distance_min"] == pytest.approx(1.0)
+
+
+def test_compact_summary_recursively_omits_detail_arrays_without_mutating_input() -> None:
+    diagnostic = _load_module(DIAG_PATH, "diagnose_action_latent_statistics_compact")
+    payload = {
+        "metrics": {"count": 2},
+        "raw": {"details": [{"row": 1}], "unit_l2": {"details": [{"row": 2}], "median": 1.0}},
+    }
+
+    compact = diagnostic._without_details(payload)
+
+    assert compact == {"metrics": {"count": 2}, "raw": {"unit_l2": {"median": 1.0}}}
+    assert payload["raw"]["details"] == [{"row": 1}]
+
+
 def test_schema_argument_variance_decomposition_reports_between_and_within_variance() -> None:
     stats = _stats_module()
     latents = torch.tensor(
@@ -213,6 +260,7 @@ def test_diagnostic_script_imports_without_running_main() -> None:
             "--max-candidates-per-state",
             "128",
             "--same-schema-only",
+            "--omit-details",
         ]
     )
 
@@ -222,6 +270,7 @@ def test_diagnostic_script_imports_without_running_main() -> None:
     assert args.max_transitions == 2
     assert args.max_candidates_per_state == 128
     assert args.same_schema_only is True
+    assert args.omit_details is True
 
 
 def test_diagnostic_argument_validation_rejects_non_positive_chunk_size() -> None:

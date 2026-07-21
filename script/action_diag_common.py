@@ -9,12 +9,11 @@ from typing import Any
 import torch
 from acs_jepa.graph import build_state_graph
 from acs_jepa.graph.schemas import GroundAction
-from omegaconf import OmegaConf
-
 from acs_jepa_cli.cli import _build_simulator_engine, _resolve_device, _to_device
 from acs_jepa_cli.config import load_config
 from acs_jepa_cli.data import LoadedCorpus, load_corpus, split_corpus
 from acs_jepa_cli.modeling import ModelBundle, build_model_bundle, vocab_sizes_from_dict
+from omegaconf import OmegaConf
 
 
 def load_checkpoint_bundle(
@@ -22,7 +21,8 @@ def load_checkpoint_bundle(
     checkpoint_path: Path,
     *,
     device_name: str,
-) -> tuple[Any, LoadedCorpus, ModelBundle, torch.device]:
+    include_restoration_metadata: bool = False,
+) -> Any:
     """Load a checkpoint, corpus, model bundle, and resolved device."""
 
     device = _resolve_device(device_name)
@@ -31,11 +31,43 @@ def load_checkpoint_bundle(
     corpus = load_corpus([dataset_dir], strict=True)
     vocab_sizes = vocab_sizes_from_dict(checkpoint["vocab_sizes"])
     bundle = build_model_bundle(corpus.parsed_problems, config, device=device, vocab_sizes=vocab_sizes)
-    bundle.jepa.load_state_dict(checkpoint["model_state_dict"])
-    bundle.jepa.eval()
-    if bundle.goal_head is not None:
-        bundle.goal_head.eval()
-    return config, corpus, bundle, device
+    restoration = restore_diagnostic_checkpoint_modules(bundle, checkpoint)
+    result = (config, corpus, bundle, device)
+    return (*result, restoration) if include_restoration_metadata else result
+
+
+def restore_diagnostic_checkpoint_modules(
+    bundle: ModelBundle,
+    checkpoint: dict[str, Any],
+) -> dict[str, dict[str, str]]:
+    """Strictly restore every module constructed for a diagnostic run."""
+
+    module_states = (
+        ("jepa", "model_state_dict"),
+        ("goal_head", "goal_head_state_dict"),
+        ("action_contrastive_anchor", "action_contrastive_anchor_state_dict"),
+        ("argument_reconstruction_head", "argument_reconstruction_head_state_dict"),
+        ("applicability_head", "applicability_head_state_dict"),
+    )
+    restoration: dict[str, dict[str, str]] = {}
+    for module_name, state_key in module_states:
+        module = getattr(bundle, module_name)
+        if module is None:
+            restoration[module_name] = {"status": "disabled", "state_key": state_key}
+            continue
+        if state_key not in checkpoint:
+            raise ValueError(f"{state_key} is missing for configured diagnostic module {module_name}")
+        state = checkpoint[state_key]
+        if state is None:
+            raise ValueError(f"{state_key} is null for configured diagnostic module {module_name}")
+        try:
+            module.load_state_dict(state, strict=True)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            message = f"{state_key} is incompatible with configured diagnostic module {module_name}: {exc}"
+            raise ValueError(message) from exc
+        module.eval()
+        restoration[module_name] = {"status": "restored", "state_key": state_key}
+    return restoration
 
 
 def select_split(corpus: LoadedCorpus, config: Any, split: str, *, seed: int) -> LoadedCorpus:

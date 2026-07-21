@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
+import json
+import os
+import platform
 import random
+import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
@@ -28,13 +34,38 @@ from action_diag_common import (
 from action_negative_sampling import sample_action_negatives
 from torch import Tensor
 
+SUMMARY_KEYS = frozenset(
+    {
+        "dataset",
+        "checkpoint",
+        "split",
+        "seed",
+        "device",
+        "per_category",
+        "eval_fraction",
+        "epochs",
+        "learning_rate",
+        "metadata",
+        "probe_split",
+        "label_counts",
+        "category_counts",
+        "example_manifest",
+        "checkpoint_restoration",
+        "probes",
+        "checkpoint_applicability_head",
+        "checkpoint_argument_reconstruction_head",
+        "environment",
+        "runtime_seconds",
+    }
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset_dir", type=Path)
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda", "mps"))
+    parser.add_argument("--device", default="cpu", choices=("cpu",))
     parser.add_argument("--split", default="val", choices=("train", "val", "test", "all"))
     parser.add_argument("--max-transitions", type=int, default=None)
     parser.add_argument("--per-category", type=int, default=4)
@@ -47,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.device != "cpu":
+        raise ValueError("supervised probes must run on CPU")
     if args.epochs <= 0:
         raise ValueError("--epochs must be positive")
     if args.learning_rate <= 0:
@@ -96,6 +129,8 @@ class ProbeExample:
     argument_mask: Tensor
     object_bank: Tensor
     argument_targets: Tensor
+    step: int = 0
+    argument_candidate_mask: Tensor | None = None
 
 
 class RoleObjectProbe(nn.Module):
@@ -183,6 +218,33 @@ def argument_features(
         selected[batch_idx, role_idx] = object_bank[position]
         targets[batch_idx, role_idx] = position
     return selected, argument_mask, object_bank, targets
+
+
+def argument_candidate_masks(
+    parsed: Any,
+    state: JEPALatentState,
+    action_names: Sequence[str],
+    argument_mask: Tensor,
+) -> Tensor:
+    """Build exact-type role masks in the state bank's sorted object-ID order."""
+
+    sorted_ids = state.object_ids[torch.argsort(state.object_ids)].tolist()
+    id_to_name = {object_id: name for name, object_id in parsed.object_to_id.items()}
+    output = torch.zeros(
+        (len(action_names), argument_mask.size(1), len(sorted_ids)),
+        dtype=torch.bool,
+        device=argument_mask.device,
+    )
+    for batch_index, action_name in enumerate(action_names):
+        parameter_types = parsed.actions[action_name].parameter_types
+        for role_index, expected_type in enumerate(parameter_types):
+            if not bool(argument_mask[batch_index, role_index]):
+                continue
+            for bank_index, object_id in enumerate(sorted_ids):
+                object_name = id_to_name[int(object_id)]
+                if parsed.objects[object_name].type == expected_type:
+                    output[batch_index, role_index, bank_index] = True
+    return output
 
 
 def stack_applicability_examples(examples: Sequence[ProbeExample]) -> tuple[dict[str, Tensor], Tensor]:
@@ -336,13 +398,92 @@ def train_applicability_probe(
     )
 
 
-def _applicability_logits(model: ApplicabilityHead, inputs: dict[str, Tensor]) -> Tensor:
+def _applicability_logits(model: nn.Module, inputs: dict[str, Tensor]) -> Tensor:
     return model(
         inputs["graph_latents"],
         inputs["action_latents"],
         inputs["object_latents"],
         inputs["argument_mask"],
     )
+
+
+def binary_metrics(logits: Tensor, labels: Tensor) -> dict[str, object]:
+    """Compute threshold-zero and exact tie-group binary ranking metrics."""
+
+    logits = logits.detach().to(dtype=torch.float64, device="cpu").flatten()
+    labels = labels.detach().to(dtype=torch.float64, device="cpu").flatten()
+    if logits.shape != labels.shape:
+        raise ValueError("logits and labels must have matching shapes")
+    if not bool(torch.isfinite(logits).all()) or not bool(torch.isfinite(labels).all()):
+        raise ValueError("logits and labels must be finite")
+    if bool(((labels != 0) & (labels != 1)).any()):
+        raise ValueError("labels must be binary")
+    count = int(labels.numel())
+    positive_count = int((labels == 1).sum())
+    negative_count = count - positive_count
+    if count == 0:
+        return {
+            "count": 0,
+            "positive_count": 0,
+            "negative_count": 0,
+            "accuracy": None,
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "auroc": None,
+            "positive_prevalence": None,
+            "average_precision": None,
+        }
+
+    predicted_positive = logits >= 0
+    positive_labels = labels.bool()
+    true_positive = int((predicted_positive & positive_labels).sum())
+    false_positive = int((predicted_positive & ~positive_labels).sum())
+    precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else 0.0
+    recall = true_positive / positive_count if positive_count else 0.0
+    f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+    positive = logits[positive_labels]
+    negative = logits[~positive_labels]
+    ranking_defined = positive_count > 0 and negative_count > 0
+    return {
+        "count": count,
+        "positive_count": positive_count,
+        "negative_count": negative_count,
+        "accuracy": float((predicted_positive == positive_labels).to(torch.float64).mean()),
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "auroc": _binary_auroc(positive, negative) if ranking_defined else None,
+        "positive_prevalence": positive_count / count,
+        "average_precision": _average_precision(logits, positive_labels) if ranking_defined else None,
+    }
+
+
+def _average_precision(logits: Tensor, positive_labels: Tensor) -> float:
+    """Integrate precision at complete descending equal-score group boundaries."""
+
+    order = torch.argsort(logits, descending=True, stable=True)
+    sorted_scores = logits[order]
+    sorted_positive = positive_labels[order]
+    total_positive = int(sorted_positive.sum())
+    cumulative_tp = 0
+    cumulative_fp = 0
+    previous_recall = 0.0
+    average_precision = 0.0
+    start = 0
+    while start < sorted_scores.numel():
+        end = start + 1
+        while end < sorted_scores.numel() and sorted_scores[end] == sorted_scores[start]:
+            end += 1
+        group_tp = int(sorted_positive[start:end].sum())
+        cumulative_tp += group_tp
+        cumulative_fp += end - start - group_tp
+        recall = cumulative_tp / total_positive
+        precision = cumulative_tp / (cumulative_tp + cumulative_fp)
+        average_precision += (recall - previous_recall) * precision
+        previous_recall = recall
+        start = end
+    return average_precision
 
 
 def applicability_metrics(
@@ -354,17 +495,13 @@ def applicability_metrics(
 ) -> dict[str, object]:
     """Report binary probe quality and true-minus-hard-negative logit margins."""
 
-    logits = logits.detach().to(dtype=torch.float32, device="cpu").flatten()
-    labels = labels.detach().to(dtype=torch.float32, device="cpu").flatten()
+    logits = logits.detach().to(dtype=torch.float64, device="cpu").flatten()
+    labels = labels.detach().to(dtype=torch.float64, device="cpu").flatten()
     if logits.shape != labels.shape:
         raise ValueError("logits and labels must have matching shapes")
     if len(group_ids) != logits.numel() or len(categories) != logits.numel():
         raise ValueError("group_ids and categories must match logits")
-    predictions = logits >= 0
-    accuracy = float((predictions == labels.bool()).float().mean().item()) if logits.numel() else None
-    positive = logits[labels == 1]
-    negative = logits[labels == 0]
-    auroc = _binary_auroc(positive, negative)
+    metrics = binary_metrics(logits, labels)
 
     references: dict[Hashable, float] = {}
     for logit, label, group, category in zip(logits.tolist(), labels.tolist(), group_ids, categories):
@@ -378,22 +515,32 @@ def applicability_metrics(
         margin = references[group] - float(logit)
         margins.append(margin)
         by_category[category].append(margin)
-    return {
-        "count": int(logits.numel()),
-        "positive_count": int(positive.numel()),
-        "negative_count": int(negative.numel()),
-        "accuracy": accuracy,
-        "auroc": auroc,
-        "margin": _distribution(margins),
-        "margin_by_category": {category: _distribution(values) for category, values in sorted(by_category.items())},
-    }
+    per_category: dict[str, dict[str, object]] = {}
+    for category in sorted(set(categories) - {"trace"}):
+        selected = [
+            index
+            for index, value in enumerate(categories)
+            if value == category or (value == "trace" and labels[index] == 1)
+        ]
+        per_category[category] = binary_metrics(logits[selected], labels[selected])
+    metrics.update(
+        {
+            "margin": _distribution(margins),
+            "margin_by_category": {
+                category: _distribution(values) for category, values in sorted(by_category.items())
+            },
+            "per_category": per_category,
+        }
+    )
+    return metrics
 
 
 def _binary_auroc(positive: Tensor, negative: Tensor) -> float | None:
     if positive.numel() == 0 or negative.numel() == 0:
         return None
     comparisons = positive[:, None] - negative[None, :]
-    return float(((comparisons > 0).float() + 0.5 * (comparisons == 0).float()).mean().item())
+    scores = (comparisons > 0).to(torch.float64) + 0.5 * (comparisons == 0).to(torch.float64)
+    return float(scores.mean())
 
 
 def _distribution(values: Sequence[float]) -> dict[str, float | int | None]:
@@ -409,14 +556,174 @@ def _distribution(values: Sequence[float]) -> dict[str, float | int | None]:
     }
 
 
-def collect_probe_examples(args: argparse.Namespace) -> tuple[list[ProbeExample], dict[str, Any], torch.device]:
+def canonical_manifest_bytes(records: Sequence[dict[str, Any]]) -> bytes:
+    """Return the exact canonical UTF-8 identity bytes for diagnostic examples."""
+
+    ordered = sorted(
+        records,
+        key=lambda record: (
+            record["group"],
+            record["category"],
+            record["action"]["name"],
+            tuple(record["action"]["arguments"]),
+            record["applicability_label"],
+            record["problem"],
+            record["step"],
+        ),
+    )
+    text = json.dumps(ordered, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    return text.encode("utf-8")
+
+
+def manifest_identity(records: Sequence[dict[str, Any]]) -> dict[str, object]:
+    canonical = canonical_manifest_bytes(records)
+    return {
+        "count": len(records),
+        "bytes": len(canonical),
+        "sha256": hashlib.sha256(canonical).hexdigest(),
+    }
+
+
+def decision_projection(summary: dict[str, Any]) -> dict[str, Any]:
+    """Retain every decision value except the six fixed runtime/path pointers."""
+
+    if set(summary) != SUMMARY_KEYS:
+        raise ValueError(
+            f"summary top-level keys must be exactly {sorted(SUMMARY_KEYS)}; got {sorted(summary)}"
+        )
+    projection = copy.deepcopy(summary)
+    for key in ("dataset", "checkpoint", "device", "runtime_seconds", "environment"):
+        del projection[key]
+    manifest = projection["example_manifest"]
+    if not isinstance(manifest, dict) or "path" not in manifest:
+        raise ValueError("example_manifest.path is required")
+    del manifest["path"]
+    return projection
+
+
+def _argument_metric_subset(
+    logits: Tensor,
+    targets: Tensor,
+    active: Tensor,
+    candidate_mask: Tensor,
+) -> dict[str, object]:
+    valid_counts: list[float] = []
+    correct = 0
+    chance = 0.0
+    margins: list[float] = []
+    for batch_index, role_index in active.nonzero(as_tuple=False).tolist():
+        valid = candidate_mask[batch_index, role_index]
+        valid_count = int(valid.sum())
+        target = int(targets[batch_index, role_index])
+        valid_counts.append(float(valid_count))
+        chance += 1.0 / valid_count
+        row = logits[batch_index, role_index].masked_fill(~valid, float("-inf"))
+        correct += int(int(row.argmax()) == target)
+        if valid_count > 1:
+            wrong = valid.clone()
+            wrong[target] = False
+            margins.append(float(row[target] - row[wrong].max()))
+    count = len(valid_counts)
+    return {
+        "active_role_count": count,
+        "competitive_role_count": len(margins),
+        "top1_accuracy": None if count == 0 else correct / count,
+        "chance_accuracy": None if count == 0 else chance / count,
+        "valid_candidate_count": _distribution(valid_counts),
+        "target_minus_best_wrong_margin": _distribution(margins),
+    }
+
+
+def argument_head_metrics(
+    logits: Tensor,
+    targets: Tensor,
+    argument_mask: Tensor,
+    candidate_mask: Tensor,
+) -> dict[str, object]:
+    """Compute exact active-role and competitive-role reconstruction diagnostics."""
+
+    logits = logits.detach().cpu()
+    targets = targets.detach().to(device="cpu", dtype=torch.long)
+    argument_mask = argument_mask.detach().cpu()
+    candidate_mask = candidate_mask.detach().cpu()
+    if argument_mask.dtype != torch.bool or candidate_mask.dtype != torch.bool:
+        raise ValueError("argument_mask and candidate_mask must be bool")
+    if logits.ndim != 3 or targets.shape != logits.shape[:2] or argument_mask.shape != targets.shape:
+        raise ValueError("argument tensors must have shapes [B,R,O], [B,R], [B,R]")
+    if candidate_mask.shape != logits.shape:
+        raise ValueError("candidate_mask must match logits")
+    if bool(candidate_mask[~argument_mask].any()):
+        raise ValueError("inactive roles must have no candidates")
+    batch_indices, role_indices = argument_mask.nonzero(as_tuple=True)
+    active_targets = targets[argument_mask]
+    if bool(((active_targets < 0) | (active_targets >= logits.size(2))).any()):
+        raise ValueError("active target must index the object bank")
+    if active_targets.numel() and not bool(
+        candidate_mask[batch_indices, role_indices, active_targets].all()
+    ):
+        raise ValueError("active target must be true in candidate_mask")
+    if not bool(torch.isfinite(logits[candidate_mask]).all()):
+        raise ValueError("valid candidate logits must be finite")
+    role_grid = torch.arange(targets.size(1))[None, :]
+    return {
+        "overall": _argument_metric_subset(logits, targets, argument_mask, candidate_mask),
+        "per_role": {
+            str(role): _argument_metric_subset(
+                logits, targets, argument_mask & (role_grid == role), candidate_mask
+            )
+            for role in range(4)
+        },
+    }
+
+
+def evaluate_checkpoint_argument_head(
+    head: nn.Module,
+    action_latents: Tensor,
+    object_banks: Sequence[Tensor],
+    targets: Sequence[Tensor],
+    argument_masks: Sequence[Tensor],
+    candidate_masks: Sequence[Tensor],
+) -> dict[str, object]:
+    """Pad trace examples and invoke the untouched production head exactly once."""
+
+    batch_size = action_latents.size(0)
+    if not (
+        len(object_banks) == len(targets) == len(argument_masks) == len(candidate_masks) == batch_size
+    ):
+        raise ValueError("argument-head inputs must have matching batch sizes")
+    max_objects = max(bank.size(0) for bank in object_banks)
+    max_roles = targets[0].numel()
+    dense_banks = object_banks[0].new_zeros((batch_size, max_objects, object_banks[0].size(-1)))
+    dense_targets = torch.full((batch_size, max_roles), -1, dtype=torch.long)
+    dense_argument_mask = torch.zeros((batch_size, max_roles), dtype=torch.bool)
+    dense_candidate_mask = torch.zeros((batch_size, max_roles, max_objects), dtype=torch.bool)
+    for index, (bank, target, active, candidates) in enumerate(
+        zip(object_banks, targets, argument_masks, candidate_masks, strict=True)
+    ):
+        if target.numel() != max_roles or active.shape != target.shape:
+            raise ValueError("all argument rows must have the same role capacity")
+        if candidates.shape != (max_roles, bank.size(0)):
+            raise ValueError("candidate mask must match role and real object counts")
+        count = bank.size(0)
+        dense_banks[index, :count] = bank
+        dense_targets[index] = target
+        dense_argument_mask[index] = active
+        dense_candidate_mask[index, :, :count] = candidates
+    with torch.no_grad():
+        logits = head(action_latents, dense_banks, dense_candidate_mask)
+    return argument_head_metrics(logits, dense_targets, dense_argument_mask, dense_candidate_mask)
+
+
+def collect_probe_examples(
+    args: argparse.Namespace,
+) -> tuple[list[ProbeExample], dict[str, Any], torch.device, Any, dict[str, Any]]:
     """Encode trace actions and hard negatives into frozen probe examples."""
 
-    device_name = _automatic_device_name() if args.device == "auto" else args.device
-    config, corpus, bundle, device = load_checkpoint_bundle(
+    config, corpus, bundle, device, restoration = load_checkpoint_bundle(
         args.dataset_dir,
         args.checkpoint,
-        device_name=device_name,
+        device_name=args.device,
+        include_restoration_metadata=True,
     )
     selected = select_split(corpus, config, args.split, seed=args.seed)
     spaces: dict[int, ActionDecodingSpace] = {}
@@ -446,6 +753,12 @@ def collect_probe_examples(args: argparse.Namespace) -> tuple[list[ProbeExample]
             repeated_state = _repeat_latent_state(state, len(actions), device=device)
             action_latents = bundle.jepa.action_encoder(action_tensors, repeated_state)
             selected_objects, argument_mask, object_bank, argument_targets = argument_features(state, action_tensors)
+            candidate_masks = argument_candidate_masks(
+                parsed,
+                state,
+                [action.name for action in actions],
+                argument_mask,
+            )
             graph_latent = state.graph_latent.squeeze(0)
             group_id = f"{record.problem_name}:{step_idx}"
             max_action_arity = max(max_action_arity, space.max_action_arity)
@@ -467,6 +780,8 @@ def collect_probe_examples(args: argparse.Namespace) -> tuple[list[ProbeExample]
                         argument_mask=argument_mask[index].detach().cpu(),
                         object_bank=object_bank.detach().cpu(),
                         argument_targets=argument_targets[index].detach().cpu(),
+                        step=step_idx,
+                        argument_candidate_mask=candidate_masks[index].detach().cpu(),
                     )
                 )
     if not examples:
@@ -477,7 +792,7 @@ def collect_probe_examples(args: argparse.Namespace) -> tuple[list[ProbeExample]
         "schemas": sorted(schema_names),
         "max_action_arity": max_action_arity,
     }
-    return examples, metadata, device
+    return examples, metadata, device, bundle, restoration
 
 
 def _repeat_latent_state(state: JEPALatentState, repeats: int, *, device: torch.device) -> JEPALatentState:
@@ -488,14 +803,6 @@ def _repeat_latent_state(state: JEPALatentState, repeats: int, *, device: torch.
         object_ids=state.object_ids.to(device).repeat(repeats),
         object_batch=torch.arange(repeats, device=device).repeat_interleave(object_count),
     )
-
-
-def _automatic_device_name() -> str:
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
 
 
 def stack_role_examples(
@@ -544,9 +851,61 @@ def _applicability_dataset(
     return inputs, labels, [example.group_id for example in examples], [example.category for example in examples]
 
 
+def _evaluate_checkpoint_applicability_head(
+    head: nn.Module,
+    train_examples: Sequence[ProbeExample],
+    eval_examples: Sequence[ProbeExample],
+) -> dict[str, object]:
+    output: dict[str, object] = {}
+    for name, examples in (("train_metrics", train_examples), ("eval_metrics", eval_examples)):
+        inputs, labels, groups, categories = _applicability_dataset(examples)
+        with torch.no_grad():
+            logits = _applicability_logits(head, inputs)
+        output[name] = applicability_metrics(
+            logits, labels, group_ids=groups, categories=categories
+        )
+    return output
+
+
+def _manifest_records(examples: Sequence[ProbeExample]) -> list[dict[str, Any]]:
+    return [
+        {
+            "group": example.group_id,
+            "problem": example.problem,
+            "step": example.step,
+            "category": example.category,
+            "action": {
+                "name": example.action_name,
+                "arguments": list(example.action_arguments),
+            },
+            "applicability_label": example.applicability_label,
+        }
+        for example in examples
+    ]
+
+
+def _environment() -> dict[str, object]:
+    return {
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "torch_version": torch.__version__,
+        "backend": "cpu",
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "num_threads": torch.get_num_threads(),
+        "num_interop_threads": torch.get_num_interop_threads(),
+        "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "byteorder": sys.byteorder,
+    }
+
+
 def run_probes(args: argparse.Namespace) -> dict[str, Any]:
     started = time.perf_counter()
-    examples, metadata, device = collect_probe_examples(args)
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.use_deterministic_algorithms(True)
+    torch.set_num_threads(1)
+    examples, metadata, device, bundle, restoration = collect_probe_examples(args)
     split = deterministic_group_split(
         [example.group_id for example in examples],
         eval_fraction=args.eval_fraction,
@@ -592,6 +951,31 @@ def run_probes(args: argparse.Namespace) -> dict[str, Any]:
         seed=args.seed,
         device=device,
     )
+    checkpoint_applicability = None
+    if bundle.applicability_head is not None:
+        checkpoint_applicability = _evaluate_checkpoint_applicability_head(
+            bundle.applicability_head, train_examples, eval_examples
+        )
+    checkpoint_argument = None
+    if bundle.argument_reconstruction_head is not None:
+        trace_examples = [example for example in examples if example.category == "trace"]
+        candidate_masks = [example.argument_candidate_mask for example in trace_examples]
+        if any(mask is None for mask in candidate_masks):
+            raise ValueError("trace argument candidate masks are required")
+        checkpoint_argument = evaluate_checkpoint_argument_head(
+            bundle.argument_reconstruction_head,
+            torch.stack([example.action_latent for example in trace_examples]),
+            [example.object_bank for example in trace_examples],
+            [example.argument_targets for example in trace_examples],
+            [example.argument_mask for example in trace_examples],
+            [mask for mask in candidate_masks if mask is not None],
+        )
+    records = _manifest_records(examples)
+    canonical = canonical_manifest_bytes(records)
+    manifest_path = args.output / "example_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_bytes(canonical)
+    example_manifest = {"path": str(manifest_path), **manifest_identity(records)}
     label_counts = Counter("applicable" if example.applicability_label else "inapplicable" for example in examples)
     category_counts = Counter(example.category for example in examples)
     return {
@@ -608,11 +992,16 @@ def run_probes(args: argparse.Namespace) -> dict[str, Any]:
         "probe_split": asdict(split),
         "label_counts": dict(sorted(label_counts.items())),
         "category_counts": dict(sorted(category_counts.items())),
+        "example_manifest": example_manifest,
+        "checkpoint_restoration": restoration,
         "probes": {
             "schema": asdict(schema_result),
             "role_object": asdict(role_result),
             "applicability": asdict(applicability_result),
         },
+        "checkpoint_applicability_head": checkpoint_applicability,
+        "checkpoint_argument_reconstruction_head": checkpoint_argument,
+        "environment": _environment(),
         "runtime_seconds": time.perf_counter() - started,
     }
 

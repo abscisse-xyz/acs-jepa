@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from acs_jepa.architectures import ActionDecodingSpace, JEPALatentState
 from action_diag_common import (
     action_key,
@@ -41,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-schema-count", type=int, default=2)
     parser.add_argument("--chunk-size", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--omit-details", action="store_true")
     return parser
 
 
@@ -62,7 +64,12 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> int:
     args = parse_args()
     started = time.perf_counter()
-    config, corpus, bundle, device = load_checkpoint_bundle(args.dataset_dir, args.checkpoint, device_name=args.device)
+    config, corpus, bundle, device, restoration = load_checkpoint_bundle(
+        args.dataset_dir,
+        args.checkpoint,
+        device_name=args.device,
+        include_restoration_metadata=True,
+    )
     selected = select_split(corpus, config, args.split, seed=args.seed)
     space_cache: dict[int, tuple[ActionDecodingSpace, tuple[Any, ...], dict[tuple[str, tuple[str, ...]], int]]] = {}
 
@@ -138,6 +145,7 @@ def main() -> int:
         "min_schema_count": args.min_schema_count,
         "chunk_size": args.chunk_size,
         "seed": args.seed,
+        "checkpoint_restoration": restoration,
         "metrics": {
             "transitions": sampled_transitions,
             "total_candidate_latents": total_candidates,
@@ -152,7 +160,7 @@ def main() -> int:
             action_keys,
             group_ids=transition_group_ids,
         ),
-        "reference_same_schema_margins": reference_same_schema_margins(
+        "reference_same_schema_margins": _reference_same_schema_margin_metrics(
             all_latents,
             schema_ids,
             action_keys,
@@ -161,10 +169,55 @@ def main() -> int:
         ),
         "schema_argument_variance": schema_argument_variance_decomposition(all_latents, schema_ids),
     }
+    if args.omit_details:
+        summary = _without_details(summary)
     write_json(args.output / "summary.json", summary)
-    write_json(args.output / "details.json", details)
+    if not args.omit_details:
+        write_json(args.output / "details.json", details)
     print(summary)
     return 0
+
+
+def _reference_same_schema_margin_metrics(
+    latents: torch.Tensor,
+    schema_ids: list[str],
+    action_keys: list[tuple[str, tuple[str, ...]]],
+    reference_mask: list[bool],
+    group_ids: list[Any],
+) -> dict[str, Any]:
+    """Return legacy raw margins plus scale-invariant unit-L2 margins."""
+
+    raw = reference_same_schema_margins(
+        latents,
+        schema_ids,
+        action_keys,
+        reference_mask,
+        group_ids,
+    )
+    unit_latents = F.normalize(
+        latents.detach().to(dtype=torch.float64, device="cpu"),
+        p=2,
+        dim=1,
+        eps=torch.finfo(torch.float64).tiny,
+    )
+    raw["unit_l2"] = reference_same_schema_margins(
+        unit_latents,
+        schema_ids,
+        action_keys,
+        reference_mask,
+        group_ids,
+    )
+    return raw
+
+
+def _without_details(value: Any) -> Any:
+    """Return a recursive copy with diagnostic detail arrays removed."""
+
+    if isinstance(value, dict):
+        return {key: _without_details(item) for key, item in value.items() if key != "details"}
+    if isinstance(value, list):
+        return [_without_details(item) for item in value]
+    return value
 
 
 def _candidate_indices(
