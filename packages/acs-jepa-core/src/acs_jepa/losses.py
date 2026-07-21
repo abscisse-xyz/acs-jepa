@@ -94,6 +94,18 @@ class ActionContrastiveLossOutput:
     num_negatives: int
 
 
+@dataclass(frozen=True)
+class ArgumentReconstructionLossOutput:
+    """Argument-object cross-entropy and strict ranking diagnostics."""
+
+    total: Tensor
+    role_accuracy: Tensor
+    competitive_role_accuracy: Tensor
+    mean_target_margin: Tensor
+    num_active_roles: int
+    num_competitive_roles: int
+
+
 class ApplicabilityLoss(nn.Module):
     """Binary cross-entropy objective for applicability logits.
 
@@ -435,6 +447,128 @@ class ActionContrastiveLoss(nn.Module):
             top1_accuracy=(margin > 0).to(dtype=positive_similarity.dtype).mean(),
             num_examples=anchor_latents.size(0),
             num_negatives=int(active_mask.sum().item()),
+        )
+
+
+class ArgumentReconstructionLoss(nn.Module):
+    """Cross-entropy over problem-local object candidates for active roles."""
+
+    def forward(
+        self,
+        logits: Tensor,
+        target_indices: Tensor,
+        argument_mask: Tensor,
+        candidate_mask: Tensor,
+    ) -> ArgumentReconstructionLossOutput:
+        """Return masked role-object cross-entropy and ranking diagnostics."""
+
+        if logits.ndim != 3:
+            raise ValueError("logits must have shape [B, R, O]")
+        batch_size, num_roles, num_candidates = logits.shape
+        if batch_size == 0 or num_roles == 0 or num_candidates == 0:
+            raise ValueError("logits shape must have non-empty B, R, and O dimensions")
+        if target_indices.shape != (batch_size, num_roles):
+            raise ValueError("target_indices shape must be [B, R]")
+        if argument_mask.shape != (batch_size, num_roles):
+            raise ValueError("argument_mask shape must be [B, R]")
+        if candidate_mask.shape != logits.shape:
+            raise ValueError("candidate_mask shape must be [B, R, O]")
+        if not torch.is_floating_point(logits):
+            raise ValueError("logits must be floating point")
+        if target_indices.dtype != torch.long:
+            raise ValueError("target_indices must have long dtype")
+        if argument_mask.dtype != torch.bool or candidate_mask.dtype != torch.bool:
+            raise ValueError("argument_mask and candidate_mask must have bool dtype")
+        if len(
+            {
+                logits.device,
+                target_indices.device,
+                argument_mask.device,
+                candidate_mask.device,
+            }
+        ) != 1:
+            raise ValueError("all argument reconstruction tensors must share a device")
+        if torch.isnan(logits).any() or torch.isposinf(logits).any():
+            raise ValueError("logits must not contain non-finite NaN or +inf values")
+        if not torch.isfinite(logits[candidate_mask]).all():
+            raise ValueError("candidate-mask-true logits must be finite")
+        if (target_indices[~argument_mask] != -1).any():
+            raise ValueError("inactive roles must use target index -1")
+
+        active_targets = target_indices[argument_mask]
+        if ((active_targets < 0) | (active_targets >= num_candidates)).any():
+            raise ValueError("active target indices must be in [0, O)")
+
+        active_candidates = candidate_mask[argument_mask]
+        if active_candidates.numel() > 0 and not active_candidates.any(dim=1).all():
+            raise ValueError("every active role must have at least one candidate")
+        if active_targets.numel() > 0:
+            validation_rows = torch.arange(
+                active_targets.numel(), device=target_indices.device
+            )
+            if not active_candidates[validation_rows, active_targets].all():
+                raise ValueError("every active target must identify an active candidate")
+
+        compute_dtype = torch.float64 if logits.dtype == torch.float64 else torch.float32
+        compute_logits = logits.to(dtype=compute_dtype)
+        num_active = active_targets.numel()
+        if num_active == 0:
+            connected_zero = compute_logits[candidate_mask][:1].sum() * 0.0
+            return ArgumentReconstructionLossOutput(
+                total=connected_zero,
+                role_accuracy=connected_zero,
+                competitive_role_accuracy=connected_zero,
+                mean_target_margin=connected_zero,
+                num_active_roles=0,
+                num_competitive_roles=0,
+            )
+        active_logits = compute_logits[argument_mask]
+        masked_logits = active_logits.masked_fill(~active_candidates, float("-inf"))
+        total = F.cross_entropy(masked_logits, active_targets)
+
+        row_ids = torch.arange(active_targets.numel(), device=logits.device)
+        target_logits = masked_logits[row_ids, active_targets]
+        competitor_mask = active_candidates.clone()
+        competitor_mask[row_ids, active_targets] = False
+        competitive_rows = competitor_mask.any(dim=1)
+        role_correct = torch.ones(
+            active_targets.numel(), dtype=torch.bool, device=logits.device
+        )
+        num_competitive = int(competitive_rows.sum().item())
+        if num_competitive > 0:
+            competitive_logits = masked_logits[competitive_rows]
+            competitive_mask = competitor_mask[competitive_rows]
+            hardest_competitors = competitive_logits.masked_fill(
+                ~competitive_mask, float("-inf")
+            ).max(dim=1).values
+            competitive_targets = target_logits[competitive_rows]
+            margins = competitive_targets - hardest_competitors
+            competitive_correct = margins > 0
+            role_correct[competitive_rows] = competitive_correct
+            competitive_accuracy = competitive_correct.to(dtype=compute_dtype).mean()
+            mean_margin = margins.mean()
+        else:
+            connected_zero = target_logits[:1].sum() * 0.0
+            competitive_accuracy = connected_zero
+            mean_margin = connected_zero
+
+        derived_outputs = (
+            total,
+            role_correct.to(dtype=compute_dtype).mean(),
+            competitive_accuracy,
+            mean_margin,
+        )
+        if not all(torch.isfinite(value).item() for value in derived_outputs):
+            raise ValueError("argument reconstruction produced a non-finite derived output")
+        role_accuracy = derived_outputs[1]
+
+        return ArgumentReconstructionLossOutput(
+            total=total,
+            role_accuracy=role_accuracy,
+            competitive_role_accuracy=competitive_accuracy,
+            mean_target_margin=mean_margin,
+            num_active_roles=active_targets.numel(),
+            num_competitive_roles=num_competitive,
         )
 
 
