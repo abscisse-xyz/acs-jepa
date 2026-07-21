@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -68,6 +69,16 @@ class ApplicabilityLossOutput:
     num_examples: int
     num_positive: int
     num_negative: int
+
+
+@dataclass(frozen=True)
+class ActionVICRegLossOutput:
+    """Scalar action-latent variance/covariance penalties."""
+
+    total: Tensor
+    std_penalty: Tensor
+    covariance_penalty: Tensor
+    num_samples: int
 
 
 class ApplicabilityLoss(nn.Module):
@@ -228,6 +239,66 @@ class CovarianceLoss(nn.Module):
         x = x - x.mean(dim=0, keepdim=True)
         cov = (x.T @ x) / (x.size(0) - 1)
         return _off_diagonal(cov).pow(2).mean()
+
+
+class ActionVICRegLoss(nn.Module):
+    """VICReg-style variance/covariance regularizer for action latents.
+
+    This helper has no paired-view invariance term. It applies the repository's
+    hinge standard-deviation penalty and mean squared off-diagonal covariance
+    penalty to action samples. Rank-3 temporal inputs are flattened across batch
+    and time. Single-sample and one-feature covariance boundaries return
+    graph-connected zeros so backward remains valid.
+
+    Args:
+        std_coeff: Non-negative weight for the variance hinge penalty.
+        cov_coeff: Non-negative weight for the covariance penalty.
+        std_margin: Positive target lower bound for per-dimension standard
+            deviation.
+    """
+
+    def __init__(
+        self,
+        *,
+        std_coeff: float = 1.0,
+        cov_coeff: float = 1.0,
+        std_margin: float = 1.0,
+    ) -> None:
+        super().__init__()
+        if not math.isfinite(std_coeff) or std_coeff < 0.0:
+            raise ValueError("std_coeff must be finite and non-negative")
+        if not math.isfinite(cov_coeff) or cov_coeff < 0.0:
+            raise ValueError("cov_coeff must be finite and non-negative")
+        if not math.isfinite(std_margin) or std_margin <= 0.0:
+            raise ValueError("std_margin must be finite and positive")
+        self.std_coeff = float(std_coeff)
+        self.cov_coeff = float(cov_coeff)
+        self.std_loss = HingeStdLoss(std_margin=std_margin)
+        self.covariance_loss = CovarianceLoss()
+
+    def forward(self, action_latents: Tensor) -> ActionVICRegLossOutput:
+        """Regularize action samples shaped ``[N, D_a]`` or ``[B, K, D_a]``."""
+
+        if not torch.is_floating_point(action_latents):
+            raise ValueError("action_latents must be floating point")
+        samples = _sample_matrix(action_latents)
+        if samples.size(0) == 0 or samples.size(1) == 0:
+            raise ValueError("action_latents must have non-empty sample and feature dimensions")
+        if samples.size(0) <= 1:
+            std_penalty = samples.sum() * 0.0
+            covariance_penalty = samples.sum() * 0.0
+        else:
+            std_penalty = self.std_loss(samples)
+            covariance_penalty = (
+                samples.sum() * 0.0 if samples.size(1) == 1 else self.covariance_loss(samples)
+            )
+        total = self.std_coeff * std_penalty + self.cov_coeff * covariance_penalty
+        return ActionVICRegLossOutput(
+            total=total,
+            std_penalty=std_penalty,
+            covariance_penalty=covariance_penalty,
+            num_samples=samples.size(0),
+        )
 
 
 class GraphVCLoss(nn.Module):

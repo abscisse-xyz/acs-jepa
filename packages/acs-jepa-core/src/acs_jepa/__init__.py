@@ -31,6 +31,8 @@ from acs_jepa.goals import (
 )
 from acs_jepa.jepa import GraphJEPA, GraphJEPATrainingOutput
 from acs_jepa.losses import (
+    ActionVICRegLoss,
+    ActionVICRegLossOutput,
     ApplicabilityLoss,
     ApplicabilityLossOutput,
     CovarianceLoss,
@@ -73,6 +75,8 @@ from acs_jepa.training import JepaTrainer, JepaTrainerConfig, JepaTrainerStepOut
 
 __all__ = [
     "ActionEncoder",
+    "ActionVICRegLoss",
+    "ActionVICRegLossOutput",
     "ApplicabilityHead",
     "ApplicabilityLoss",
     "ApplicabilityLossOutput",
