@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
 import duckdb
-from acs_jepa.graph import PDDLAtomTrajectoryDataset, PDDLTrajectoryDataset, TrajectorySample, parse_domain_problem
+from acs_jepa.graph import (
+    ATOM_STATE_APPLICABILITY_SEMANTICS,
+    ActionApplicabilityTable,
+    ActionSupervisionConfig,
+    PDDLAtomTrajectoryDataset,
+    PDDLTrajectoryDataset,
+    TrajectorySample,
+    action_applicability_state_key,
+    parse_domain_problem,
+)
 from acs_jepa.graph.schemas import GroundAction, GroundAtom, ParsedProblem
 
 RELEVANT_TRANSITIONS_SQL = """
@@ -251,13 +261,194 @@ def split_corpus(corpus: LoadedCorpus, *, val_fraction: float, test_fraction: fl
     )
 
 
+def load_action_applicability_table(
+    path: str | Path,
+    parsed_problems: Sequence[ParsedProblem],
+) -> ActionApplicabilityTable:
+    """Load a strict, duplicate-safe offline atom-state applicability artifact."""
+
+    artifact_path = Path(path)
+    if not artifact_path.is_absolute():
+        raise ValueError("action_applicability_table_path must be absolute")
+
+    try:
+        payload = json.loads(
+            artifact_path.read_text(encoding="utf-8"),
+            object_pairs_hook=_JsonObjectPairs,
+        )
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid applicability JSON in {artifact_path}: {exc}") from exc
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"cannot read UTF-8 applicability JSON at {artifact_path}: {exc}") from exc
+    artifact_context = f"{artifact_path}: artifact"
+    payload = _require_exact_object(
+        payload, {"semantics", "entries"}, context=artifact_context
+    )
+    if payload["semantics"] != ATOM_STATE_APPLICABILITY_SEMANTICS:
+        raise ValueError(
+            f"{artifact_context} semantics must be "
+            f"{ATOM_STATE_APPLICABILITY_SEMANTICS!r}"
+        )
+    entries_payload = payload["entries"]
+    if type(entries_payload) is not list:
+        raise ValueError(f"{artifact_context}.entries must be a list")
+
+    mapping = {}
+    for entry_index, entry in enumerate(entries_payload):
+        context = f"{artifact_path}: artifact.entries[{entry_index}]"
+        entry = _require_exact_object(
+            entry,
+            {
+                "problem_index",
+                "problem_name",
+                "state_atoms",
+                "applicable_actions",
+            },
+            context=context,
+        )
+        problem_index = entry["problem_index"]
+        if type(problem_index) is not int or not 0 <= problem_index < len(parsed_problems):
+            raise ValueError(f"{context}.problem_index is out of range")
+        problem_name = entry["problem_name"]
+        if type(problem_name) is not str or problem_name != parsed_problems[problem_index].name:
+            raise ValueError(f"{context}.problem_name does not match parsed problem identity")
+        atoms = _parse_ground_values(
+            entry["state_atoms"],
+            name_key="predicate",
+            value_type=GroundAtom,
+            context=f"{context}.state_atoms",
+        )
+        if len(set(atoms)) != len(atoms):
+            raise ValueError(f"{context} contains a duplicate state atom")
+        actions = _parse_ground_values(
+            entry["applicable_actions"],
+            name_key="name",
+            value_type=GroundAction,
+            context=f"{context}.applicable_actions",
+        )
+        if len(set(actions)) != len(actions):
+            raise ValueError(f"{context} contains a duplicate applicable action")
+        key = action_applicability_state_key(problem_index, atoms)
+        if key in mapping:
+            raise ValueError(f"{context} duplicates applicability state key {key!r}")
+        mapping[key] = set(actions)
+        try:
+            _validate_action_applicability_table(
+                ActionApplicabilityTable.from_mapping({key: set(actions)}),
+                parsed_problems,
+            )
+        except ValueError as exc:
+            raise ValueError(f"{context}: {exc}") from exc
+
+    table = ActionApplicabilityTable.from_mapping(mapping)
+    _validate_action_applicability_table(table, parsed_problems)
+    return table
+
+
+class _JsonObjectPairs(list[tuple[str, Any]]):
+    """Pair-preserving JSON object used for context-aware duplicate checks."""
+
+
+def _validate_action_applicability_table(
+    table: ActionApplicabilityTable,
+    parsed_problems: Sequence[ParsedProblem],
+) -> None:
+    validation_config = ActionSupervisionConfig(
+        num_negatives=0,
+        applicable_actions_by_state=table,
+        applicability_state_semantics=ATOM_STATE_APPLICABILITY_SEMANTICS,
+    )
+    # Construction performs Stage 2D2 problem-indexed symbolic validation without
+    # simulator calls; an empty trajectory collection is an approved boundary.
+    PDDLTrajectoryDataset(
+        parsed_problems,
+        (),
+        include_static=True,
+        action_supervision=validation_config,
+    )
+
+
+def _require_exact_object(
+    value: Any, expected_keys: set[str], *, context: str
+) -> dict[str, Any]:
+    if not isinstance(value, _JsonObjectPairs):
+        raise ValueError(f"{context} must be a JSON object")
+    result: dict[str, Any] = {}
+    for key, member_value in value:
+        if key in result:
+            raise ValueError(f"{context} contains duplicate JSON member {key!r}")
+        result[key] = member_value
+    actual = set(result)
+    if actual != expected_keys:
+        raise ValueError(
+            f"{context} must contain exactly {sorted(expected_keys)!r}; got {sorted(actual)!r}"
+        )
+    return result
+
+
+def _parse_ground_values(
+    value: Any,
+    *,
+    name_key: str,
+    value_type: type[GroundAtom] | type[GroundAction],
+    context: str,
+) -> tuple[GroundAtom, ...] | tuple[GroundAction, ...]:
+    if type(value) is not list:
+        raise ValueError(f"{context} must be a list")
+    parsed = []
+    for index, item in enumerate(value):
+        item_context = f"{context}[{index}]"
+        item = _require_exact_object(item, {name_key, "arguments"}, context=item_context)
+        name = item[name_key]
+        arguments = item["arguments"]
+        if type(name) is not str or type(arguments) is not list or any(
+            type(argument) is not str for argument in arguments
+        ):
+            raise ValueError(f"{item_context} name and arguments must be strings")
+        parsed.append(value_type(name, tuple(arguments)))
+    return tuple(parsed)
+
+
 def make_torch_dataset(corpus: LoadedCorpus, config: Any):
     """Create the core PyG dataset matching the configured goal-head mode."""
 
     goal_kind = str(config.model.goal_head.kind)
     windows = trajectory_windows(corpus.trajectories, rollout_steps=int(config.data.rollout_steps))
+    loss_cfg = config.model.loss
+    action_supervision = None
+    needs_action_supervision = any(
+        float(value) > 0.0
+        for value in (
+            loss_cfg.action_contrastive_coeff,
+            loss_cfg.argument_reconstruction_coeff,
+            loss_cfg.applicability_coeff,
+        )
+    )
+    if needs_action_supervision:
+        table_path = config.data.action_applicability_table_path
+        table = (
+            None
+            if table_path is None
+            else load_action_applicability_table(str(table_path), corpus.parsed_problems)
+        )
+        action_supervision = ActionSupervisionConfig(
+            num_negatives=config.model.loss.action_hard_negatives_per_positive,
+            seed=config.data.action_supervision_seed,
+            max_random_attempts_per_category=(
+                config.data.action_negative_max_attempts_per_category
+            ),
+            applicable_actions_by_state=table,
+            applicability_state_semantics=(
+                None if table is None else ATOM_STATE_APPLICABILITY_SEMANTICS
+            ),
+        )
     if goal_kind == "none":
-        return PDDLTrajectoryDataset(corpus.parsed_problems, windows, include_static=True)
+        return PDDLTrajectoryDataset(
+            corpus.parsed_problems,
+            windows,
+            include_static=True,
+            action_supervision=action_supervision,
+        )
     return PDDLAtomTrajectoryDataset(
         corpus.parsed_problems,
         windows,
@@ -269,6 +460,7 @@ def make_torch_dataset(corpus: LoadedCorpus, config: Any):
         include_terminal_state=goal_kind in {"gaussian", "gmm", "conditional_sampler"},
         max_goal_atoms=None if config.data.max_goal_atoms is None else int(config.data.max_goal_atoms),
         seed=0,
+        action_supervision=action_supervision,
     )
 
 

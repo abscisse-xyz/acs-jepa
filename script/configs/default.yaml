@@ -65,6 +65,25 @@ model:
     # Optional per-order weights for K-step prediction losses; null uses uniform weights.
     rollout_order_weights: null
 
+    # Disabled-by-default Phase 2 grounded-action auxiliary objectives.
+    action_vicreg_coeff: 0.0
+    action_vicreg_std_coeff: 1.0
+    action_vicreg_cov_coeff: 1.0
+    action_vicreg_std_margin: 1.0
+    action_contrastive_coeff: 0.0
+    action_contrastive_temperature: 0.1
+    action_hard_negatives_per_positive: 0
+    argument_reconstruction_coeff: 0.0
+    applicability_coeff: 0.0
+    # Reserved for a future reviewed SIGReg implementation; must remain zero.
+    action_sigreg_coeff: 0.0
+
+  argument_reconstruction_head:
+    # Optional positive-action argument reconstruction head: none or mlp.
+    kind: none
+    hidden_dim: 64
+    dropout: 0.0
+
   goal_head:
     # Optional auxiliary goal module: none, predicate, gaussian, gmm, or conditional_sampler.
     kind: gmm
@@ -139,6 +158,12 @@ data:
   goal_positive_fraction: 0.5
   # Maximum number of goal atoms encoded per transition, or null for all atoms.
   max_goal_atoms: null
+  # Base seed for content-derived action-supervision sampling.
+  action_supervision_seed: 0
+  # Bounded rejection-sampling attempts per negative category.
+  action_negative_max_attempts_per_category: 32
+  # Absolute path to a strict offline applicability JSON artifact, or null.
+  action_applicability_table_path: null
 
 training:
   # Number of full passes over the training split.

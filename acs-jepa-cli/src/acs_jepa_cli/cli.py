@@ -611,6 +611,15 @@ def _step_metrics(output: Any) -> dict[str, float]:
     }
     if output.goal_loss is not None:
         metrics["goal_loss"] = float(output.goal_loss.detach().cpu().item())
+    for attribute, metric_name in (
+        ("action_vicreg_loss", "action_vicreg_loss"),
+        ("action_contrastive_loss", "action_contrastive_loss"),
+        ("argument_reconstruction_loss", "argument_reconstruction_loss"),
+        ("applicability_loss", "applicability_loss"),
+    ):
+        value = getattr(output, attribute, None)
+        if value is not None:
+            metrics[metric_name] = float(value.detach().cpu().item())
     for name, value in output.terms.items():
         metrics[f"term/{name.replace('/', '_')}"] = float(value.detach().cpu().item())
     return metrics
@@ -634,16 +643,46 @@ def _load_checkpoint_state(bundle: Any, checkpoint: dict[str, Any]) -> None:
     if bundle.goal_head is not None and checkpoint.get("goal_head_state_dict") is not None:
         bundle.goal_head.load_state_dict(checkpoint["goal_head_state_dict"])
     applicability_state = checkpoint.get("applicability_head_state_dict")
-    if bundle.applicability_head is None:
+    if bundle.applicability_head is not None:
+        if applicability_state is None:
+            warnings.warn(
+                "Checkpoint does not contain applicability_head_state_dict; leaving applicability head initialized",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            bundle.applicability_head.load_state_dict(applicability_state)
+    _load_optional_module_state(
+        bundle.action_contrastive_anchor,
+        checkpoint,
+        "action_contrastive_anchor_state_dict",
+        "action contrastive anchor",
+    )
+    _load_optional_module_state(
+        bundle.argument_reconstruction_head,
+        checkpoint,
+        "argument_reconstruction_head_state_dict",
+        "argument reconstruction head",
+    )
+
+
+def _load_optional_module_state(
+    module: nn.Module | None,
+    checkpoint: dict[str, Any],
+    key: str,
+    label: str,
+) -> None:
+    if module is None:
         return
-    if applicability_state is None:
+    state = checkpoint.get(key)
+    if state is None:
         warnings.warn(
-            "Checkpoint does not contain applicability_head_state_dict; leaving applicability head initialized",
+            f"Checkpoint does not contain {key}; leaving {label} initialized",
             UserWarning,
             stacklevel=2,
         )
         return
-    bundle.applicability_head.load_state_dict(applicability_state)
+    module.load_state_dict(state)
 
 
 def _save_checkpoint(path: Path, bundle: Any, config: Any, epoch: int, step: int, best_eval: float) -> None:
@@ -654,6 +693,16 @@ def _save_checkpoint(path: Path, bundle: Any, config: Any, epoch: int, step: int
             "goal_head_state_dict": None if bundle.goal_head is None else bundle.goal_head.state_dict(),
             "applicability_head_state_dict": (
                 None if bundle.applicability_head is None else bundle.applicability_head.state_dict()
+            ),
+            "action_contrastive_anchor_state_dict": (
+                None
+                if bundle.action_contrastive_anchor is None
+                else bundle.action_contrastive_anchor.state_dict()
+            ),
+            "argument_reconstruction_head_state_dict": (
+                None
+                if bundle.argument_reconstruction_head is None
+                else bundle.argument_reconstruction_head.state_dict()
             ),
             "optimizer_state_dict": bundle.optimizer.state_dict(),
             "scheduler_state_dict": None if bundle.scheduler is None else bundle.scheduler.state_dict(),

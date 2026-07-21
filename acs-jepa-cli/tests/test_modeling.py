@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import acs_jepa_cli.cli as cli
 import pytest
 import torch
-from acs_jepa import ApplicabilityHead, ApplicabilityLoss
+from acs_jepa import (
+    ActionContrastiveLoss,
+    ActionVICRegLoss,
+    ApplicabilityHead,
+    ApplicabilityLoss,
+    ArgumentReconstructionHead,
+    ArgumentReconstructionLoss,
+    GraphInverseDynamicsModel,
+)
 from acs_jepa.graph import parse_domain_problem
 from acs_jepa_cli.config import load_config
-from acs_jepa_cli.modeling import build_model_bundle
+from acs_jepa_cli.modeling import build_model_bundle, compute_vocab_sizes
 
 DOMAIN = """
 (define (domain tiny-city)
@@ -68,10 +77,89 @@ def test_build_model_bundle_default_has_no_applicability_modules(tmp_path: Path)
 
     assert bundle.applicability_head is None
     assert bundle.applicability_loss_module is None
+    assert bundle.action_vicreg_loss_module is None
+    assert bundle.action_contrastive_loss_module is None
+    assert bundle.action_contrastive_anchor is None
+    assert bundle.argument_reconstruction_head is None
+    assert bundle.argument_reconstruction_loss_module is None
     assert bundle.trainer.config.applicability_loss_weight == 0.0
+    assert bundle.trainer.config.integrated_applicability_loss_weight == 0.0
+    assert bundle.trainer.config.action_vicreg_loss_weight == 0.0
+    assert bundle.trainer.config.action_contrastive_loss_weight == 0.0
+    assert bundle.trainer.config.argument_reconstruction_loss_weight == 0.0
+    assert config.model.loss.action_vicreg_std_coeff == 1.0
+    assert config.model.loss.action_vicreg_cov_coeff == 1.0
+    assert config.model.loss.action_vicreg_std_margin == 1.0
+    assert config.model.loss.action_contrastive_temperature == 0.1
+    assert config.model.loss.action_hard_negatives_per_positive == 0
+    assert config.model.argument_reconstruction_head.kind == "none"
     assert bundle.trainer.applicability_head is None
     assert bundle.trainer.applicability_loss_module is None
     assert _optimizer_parameter_ids(bundle.optimizer) == _module_parameter_ids(bundle.jepa, bundle.goal_head)
+
+
+def test_build_model_bundle_does_not_construct_zero_weight_applicability_head(tmp_path: Path) -> None:
+    parsed = _parsed_problem(tmp_path)
+    config = _load_small_config(
+        tmp_path,
+        extra="""
+model:
+  applicability_head:
+    kind: mlp
+""",
+    )
+    bundle = build_model_bundle((parsed,), config, device=torch.device("cpu"))
+
+    assert bundle.applicability_head is None
+    assert bundle.applicability_loss_module is None
+
+
+
+def test_build_model_bundle_constructs_action_auxiliary_modules(tmp_path: Path) -> None:
+    parsed = _parsed_problem(tmp_path)
+    table_path = tmp_path / "applicability.json"
+    table_path.write_text("{}")
+    config = _load_small_config(
+        tmp_path,
+        extra=f"""
+model:
+  loss:
+    action_vicreg_coeff: 0.2
+    action_contrastive_coeff: 0.3
+    action_hard_negatives_per_positive: 2
+    argument_reconstruction_coeff: 0.4
+    applicability_coeff: 0.5
+  argument_reconstruction_head:
+    kind: mlp
+  applicability_head:
+    kind: mlp
+data:
+  action_applicability_table_path: {table_path}
+""",
+    )
+
+    bundle = build_model_bundle((parsed,), config, device=torch.device("cpu"))
+
+    assert isinstance(bundle.action_vicreg_loss_module, ActionVICRegLoss)
+    assert isinstance(bundle.action_contrastive_loss_module, ActionContrastiveLoss)
+    assert isinstance(bundle.action_contrastive_anchor, GraphInverseDynamicsModel)
+    assert isinstance(bundle.argument_reconstruction_head, ArgumentReconstructionHead)
+    assert isinstance(bundle.argument_reconstruction_loss_module, ArgumentReconstructionLoss)
+    assert isinstance(bundle.applicability_head, ApplicabilityHead)
+    assert bundle.trainer.config.integrated_applicability_loss_weight == 0.5
+    assert _module_parameter_ids(
+        bundle.action_contrastive_anchor,
+        bundle.argument_reconstruction_head,
+        bundle.applicability_head,
+    ) <= _optimizer_parameter_ids(bundle.optimizer)
+    assert _optimizer_parameter_ids(bundle.optimizer) == _module_parameter_ids(
+        bundle.jepa,
+        bundle.goal_head,
+        bundle.action_contrastive_anchor,
+        bundle.argument_reconstruction_head,
+        bundle.applicability_head,
+    )
+
 
 
 def test_build_model_bundle_constructs_enabled_applicability_modules(tmp_path: Path) -> None:
@@ -100,6 +188,114 @@ trainer:
     assert bundle.trainer.config.applicability_loss_weight == 0.5
     assert bundle.trainer.config.applicability_head_detach is False
     assert _module_parameter_ids(bundle.applicability_head) <= _optimizer_parameter_ids(bundle.optimizer)
+
+
+def test_build_model_bundle_rejects_action_auxiliary_config_conflicts(tmp_path: Path) -> None:
+    parsed = _parsed_problem(tmp_path)
+    table_path = tmp_path / "labels.json"
+    table_path.write_text("{}")
+    invalid_cases = [
+        (
+            f"""
+model:
+  loss:
+    applicability_coeff: 0.2
+    action_hard_negatives_per_positive: 1
+  applicability_head:
+    kind: mlp
+trainer:
+  applicability_loss_weight: 0.3
+data:
+  action_applicability_table_path: {table_path}
+""",
+            "mutually exclusive",
+        ),
+        (
+            """
+model:
+  loss:
+    action_sigreg_coeff: 0.1
+""",
+            "action_sigreg_coeff.*must remain zero",
+        ),
+        (
+            """
+model:
+  loss:
+    action_contrastive_coeff: 0.1
+""",
+            "require action hard negatives",
+        ),
+        (
+            """
+model:
+  loss:
+    applicability_coeff: 0.1
+    action_hard_negatives_per_positive: 1
+  applicability_head:
+    kind: mlp
+data:
+  action_applicability_table_path: relative.json
+""",
+            "must be absolute",
+        ),
+        (
+            """
+model:
+  loss:
+    action_hard_negatives_per_positive: true
+""",
+            "non-negative integer",
+        ),
+        (
+            """
+model:
+  loss:
+    action_vicreg_std_margin: 0.0
+""",
+            "action_vicreg_std_margin.*positive",
+        ),
+        (
+            """
+model:
+  loss:
+    action_vicreg_std_coeff: -1.0
+""",
+            "action_vicreg_std_coeff.*non-negative",
+        ),
+        (
+            """
+model:
+  loss:
+    action_contrastive_temperature: 0.0
+""",
+            "action_contrastive_temperature.*positive",
+        ),
+        (
+            """
+model:
+  loss:
+    argument_reconstruction_coeff: 0.1
+""",
+            "requires an enabled argument head",
+        ),
+        (
+            """
+model:
+  argument_reconstruction_head:
+    dropout: -0.1
+""",
+            "argument reconstruction head dropout",
+        ),
+    ]
+    for extra, match in invalid_cases:
+        with pytest.raises(ValueError, match=match):
+            build_model_bundle(
+                (parsed,),
+                _load_small_config(tmp_path, extra=extra),
+                device=torch.device("cpu"),
+            )
+
 
 
 def test_build_model_bundle_rejects_invalid_applicability_config(tmp_path: Path) -> None:
@@ -160,6 +356,29 @@ trainer:
         build_model_bundle((parsed,), config, device=torch.device("cpu"))
 
 
+def test_argument_reconstruction_requires_nonempty_object_vocabulary(tmp_path: Path) -> None:
+    parsed = _parsed_problem(tmp_path)
+    config = _load_small_config(
+        tmp_path,
+        extra="""
+model:
+  loss:
+    argument_reconstruction_coeff: 0.5
+  argument_reconstruction_head:
+    kind: mlp
+""",
+    )
+    empty_vocab = replace(compute_vocab_sizes((parsed,)), num_objects=0)
+
+    with pytest.raises(ValueError, match="at least one object"):
+        build_model_bundle(
+            (parsed,),
+            config,
+            device=torch.device("cpu"),
+            vocab_sizes=empty_vocab,
+        )
+
+
 def test_checkpoint_saves_and_restores_applicability_head_state(tmp_path: Path) -> None:
     parsed = _parsed_problem(tmp_path)
     config = _load_small_config(
@@ -192,6 +411,51 @@ trainer:
         assert torch.allclose(value, restored.applicability_head.state_dict()[name])
 
 
+def test_checkpoint_saves_and_restores_action_auxiliary_modules_without_applicability(
+    tmp_path: Path,
+) -> None:
+    parsed = _parsed_problem(tmp_path)
+    config = _load_small_config(
+        tmp_path,
+        extra="""
+model:
+  loss:
+    action_contrastive_coeff: 0.3
+    action_hard_negatives_per_positive: 1
+    argument_reconstruction_coeff: 0.4
+  argument_reconstruction_head:
+    kind: mlp
+""",
+    )
+    bundle = build_model_bundle((parsed,), config, device=torch.device("cpu"))
+    checkpoint_path = tmp_path / "action-auxiliary.pt"
+    cli._save_checkpoint(checkpoint_path, bundle, config, epoch=0, step=2, best_eval=1.0)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["action_contrastive_anchor_state_dict"] is not None
+    assert checkpoint["argument_reconstruction_head_state_dict"] is not None
+
+    restored = build_model_bundle((parsed,), config, device=torch.device("cpu"))
+    assert bundle.action_contrastive_anchor is not None
+    assert bundle.argument_reconstruction_head is not None
+    assert restored.action_contrastive_anchor is not None
+    assert restored.argument_reconstruction_head is not None
+    with torch.no_grad():
+        for module in (
+            restored.action_contrastive_anchor,
+            restored.argument_reconstruction_head,
+        ):
+            for parameter in module.parameters():
+                parameter.add_(10.0)
+    cli._load_checkpoint_state(restored, checkpoint)
+    for source, target in (
+        (bundle.action_contrastive_anchor, restored.action_contrastive_anchor),
+        (bundle.argument_reconstruction_head, restored.argument_reconstruction_head),
+    ):
+        for name, value in source.state_dict().items():
+            assert torch.allclose(value, target.state_dict()[name])
+
+
+
 def test_checkpoint_saves_disabled_applicability_state_as_none(tmp_path: Path) -> None:
     parsed = _parsed_problem(tmp_path)
     config = _load_small_config(tmp_path)
@@ -202,6 +466,8 @@ def test_checkpoint_saves_disabled_applicability_state_as_none(tmp_path: Path) -
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
     assert checkpoint["applicability_head_state_dict"] is None
+    assert checkpoint["action_contrastive_anchor_state_dict"] is None
+    assert checkpoint["argument_reconstruction_head_state_dict"] is None
 
 
 def test_checkpoint_loader_warns_but_allows_old_missing_applicability_state(tmp_path: Path) -> None:
@@ -224,6 +490,34 @@ trainer:
 
     with pytest.warns(UserWarning, match="applicability_head_state_dict"):
         cli._load_checkpoint_state(bundle, checkpoint)
+
+
+def test_checkpoint_loader_warns_for_old_missing_action_auxiliary_states(tmp_path: Path) -> None:
+    parsed = _parsed_problem(tmp_path)
+    config = _load_small_config(
+        tmp_path,
+        extra="""
+model:
+  loss:
+    action_contrastive_coeff: 0.3
+    action_hard_negatives_per_positive: 1
+    argument_reconstruction_coeff: 0.4
+  argument_reconstruction_head:
+    kind: mlp
+""",
+    )
+    bundle = build_model_bundle((parsed,), config, device=torch.device("cpu"))
+    assert bundle.goal_head is not None
+    checkpoint = {
+        "model_state_dict": bundle.jepa.state_dict(),
+        "goal_head_state_dict": bundle.goal_head.state_dict(),
+    }
+    with pytest.warns(UserWarning) as records:
+        cli._load_checkpoint_state(bundle, checkpoint)
+    messages = "\n".join(str(record.message) for record in records)
+    assert "action_contrastive_anchor_state_dict" in messages
+    assert "argument_reconstruction_head_state_dict" in messages
+
 
 
 def test_cmd_eval_routes_checkpoint_loading_through_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
