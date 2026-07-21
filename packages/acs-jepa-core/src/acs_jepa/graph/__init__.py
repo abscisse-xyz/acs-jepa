@@ -19,10 +19,15 @@ from acs_jepa.graph.builders import (
     tensorize_predicate,
 )
 from acs_jepa.graph.dataset import (
+    ATOM_STATE_APPLICABILITY_SEMANTICS,
+    ActionApplicabilityStateKey,
+    ActionApplicabilityTable,
+    ActionSupervisionConfig,
     PDDLAtomTrajectoryDataset,
     PDDLGraphDataset,
     PDDLTrajectoryDataset,
     TrajectorySample,
+    action_applicability_state_key,
 )
 from acs_jepa.graph.encoders import GraphEncoder, GraphEncoderOutput
 from acs_jepa.graph.parsing import parse_domain_problem
@@ -36,7 +41,11 @@ from acs_jepa.graph.schemas import (
 )
 
 __all__ = [
+    "ATOM_STATE_APPLICABILITY_SEMANTICS",
+    "ActionApplicabilityStateKey",
+    "ActionApplicabilityTable",
     "ActionSchema",
+    "ActionSupervisionConfig",
     "ApplicabilityLabeler",
     "GroundAction",
     "GroundAtom",
@@ -56,6 +65,7 @@ __all__ = [
     "ROLE_SWAP",
     "SampledActionNegative",
     "TrajectorySample",
+    "action_applicability_state_key",
     "build_action_supervision_tensors",
     "build_state_graph",
     "parse_domain_problem",

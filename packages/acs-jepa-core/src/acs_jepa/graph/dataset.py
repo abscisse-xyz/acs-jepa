@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import random
+from collections.abc import Iterator, Mapping, Sequence, Set
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
 
 import torch
 from torch_geometric.data import Dataset
 
+from acs_jepa.graph.action_supervision import build_action_supervision_tensors
 from acs_jepa.graph.builders import build_state_graph, tensorize_action, tensorize_goal_atoms, tensorize_predicate
 from acs_jepa.graph.parsing import parse_domain_problem
 from acs_jepa.graph.schemas import GroundAction, GroundAtom, ParsedProblem
@@ -22,6 +24,7 @@ _DEFAULT_NEGATIVE_SOURCE_WEIGHTS = {
     "action_modified": 0.20,
     "unsatisfied_goal": 0.10,
 }
+ATOM_STATE_APPLICABILITY_SEMANTICS = "positive_ground_atoms_closed_world_v1"
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,141 @@ class TrajectorySample:
     def __post_init__(self) -> None:
         if len(self.states) != len(self.actions) + 1:
             raise ValueError("TrajectorySample requires len(states) == len(actions) + 1")
+
+
+@dataclass(frozen=True, order=True)
+class ActionApplicabilityStateKey:
+    """Canonical atom-only state identity for an offline applicability table."""
+
+    problem_index: int
+    state_atoms: tuple[GroundAtom, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.problem_index) is not int or self.problem_index < 0:
+            raise ValueError("problem_index must be a non-negative integer")
+        if type(self.state_atoms) is not tuple or any(
+            type(atom) is not GroundAtom for atom in self.state_atoms
+        ):
+            raise ValueError("state_atoms must be an exact tuple of GroundAtom values")
+        if self.state_atoms != tuple(sorted(set(self.state_atoms))):
+            raise ValueError("state_atoms must be sorted and duplicate-free")
+
+
+def action_applicability_state_key(
+    problem_index: int,
+    state_atoms: Sequence[GroundAtom],
+) -> ActionApplicabilityStateKey:
+    """Canonicalize a represented positive-atom state for oracle lookup."""
+
+    if any(type(atom) is not GroundAtom for atom in state_atoms):
+        raise ValueError("state_atoms must contain only exact GroundAtom values")
+    return ActionApplicabilityStateKey(
+        problem_index=problem_index,
+        state_atoms=tuple(sorted(set(state_atoms))),
+    )
+
+
+@dataclass(frozen=True)
+class ActionApplicabilityTable(
+    Mapping[ActionApplicabilityStateKey, frozenset[GroundAction]]
+):
+    """Pickleable immutable state-to-applicable-actions mapping."""
+
+    entries: tuple[
+        tuple[ActionApplicabilityStateKey, frozenset[GroundAction]], ...
+    ]
+
+    def __post_init__(self) -> None:
+        if type(self.entries) is not tuple:
+            raise ValueError("entries must be an exact tuple")
+        previous_key: ActionApplicabilityStateKey | None = None
+        for entry in self.entries:
+            if type(entry) is not tuple or len(entry) != 2:
+                raise ValueError("each table entry must be an exact key/value tuple")
+            key, actions = entry
+            if type(key) is not ActionApplicabilityStateKey:
+                raise ValueError("table keys must be exact ActionApplicabilityStateKey values")
+            if type(actions) is not frozenset or any(
+                type(action) is not GroundAction for action in actions
+            ):
+                raise ValueError("table values must be exact frozensets of GroundAction values")
+            if previous_key is not None and key <= previous_key:
+                raise ValueError("table entries must have sorted unique keys")
+            previous_key = key
+
+    @classmethod
+    def from_mapping(
+        cls,
+        source: Mapping[ActionApplicabilityStateKey, Set[GroundAction]],
+    ) -> ActionApplicabilityTable:
+        if not isinstance(source, Mapping):
+            raise ValueError("applicable_actions_by_state must be a mapping")
+        entries = []
+        for key, actions in source.items():
+            if type(key) is not ActionApplicabilityStateKey:
+                raise ValueError("table keys must be exact ActionApplicabilityStateKey values")
+            if not isinstance(actions, Set) or any(
+                type(action) is not GroundAction for action in actions
+            ):
+                raise ValueError("table values must be sets of exact GroundAction values")
+            entries.append((key, frozenset(actions)))
+        return cls(tuple(sorted(entries, key=lambda entry: entry[0])))
+
+    def __getitem__(self, key: ActionApplicabilityStateKey) -> frozenset[GroundAction]:
+        low = 0
+        high = len(self.entries)
+        while low < high:
+            middle = (low + high) // 2
+            middle_key = self.entries[middle][0]
+            if middle_key < key:
+                low = middle + 1
+            else:
+                high = middle
+        if low >= len(self.entries) or self.entries[low][0] != key:
+            raise KeyError(key)
+        return self.entries[low][1]
+
+    def __iter__(self) -> Iterator[ActionApplicabilityStateKey]:
+        return (key for key, _ in self.entries)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+
+@dataclass(frozen=True)
+class ActionSupervisionConfig:
+    """Disabled-by-default trajectory action-supervision settings."""
+
+    num_negatives: int
+    seed: int = 0
+    max_random_attempts_per_category: int = 128
+    applicable_actions_by_state: (
+        Mapping[ActionApplicabilityStateKey, Set[GroundAction]]
+        | ActionApplicabilityTable
+        | None
+    ) = None
+    applicability_state_semantics: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("num_negatives", "seed", "max_random_attempts_per_category"):
+            if type(getattr(self, name)) is not int:
+                raise ValueError(f"{name} must be an integer")
+        if self.num_negatives < 0:
+            raise ValueError("num_negatives must be non-negative")
+        if self.max_random_attempts_per_category <= 0:
+            raise ValueError("max_random_attempts_per_category must be positive")
+        table = self.applicable_actions_by_state
+        if table is None:
+            if self.applicability_state_semantics is not None:
+                raise ValueError("applicability_state_semantics requires an oracle table")
+            return
+        if self.applicability_state_semantics != ATOM_STATE_APPLICABILITY_SEMANTICS:
+            raise ValueError(
+                "oracle tables require positive_ground_atoms_closed_world_v1 semantics"
+            )
+        if type(table) is not ActionApplicabilityTable:
+            table = ActionApplicabilityTable.from_mapping(table)
+            object.__setattr__(self, "applicable_actions_by_state", table)
 
 
 class PDDLGraphDataset(Dataset):
@@ -108,6 +246,7 @@ class PDDLTrajectoryDataset(Dataset):
         trajectories: Sequence[TrajectorySample],
         *,
         include_static: bool = True,
+        action_supervision: ActionSupervisionConfig | None = None,
         transform=None,
         pre_transform=None,
     ) -> None:
@@ -116,6 +255,14 @@ class PDDLTrajectoryDataset(Dataset):
         self.trajectories = tuple(trajectories)
         self.include_static = include_static
         self.max_action_arity = _max_action_arity(self.parsed_problems)
+        self.max_objects = _max_objects(self.parsed_problems)
+        self.action_supervision = action_supervision
+        if action_supervision is not None:
+            _validate_action_supervision_dataset(
+                self.parsed_problems,
+                self.trajectories,
+                action_supervision,
+            )
 
     def len(self) -> int:
         return len(self.trajectories)
@@ -123,7 +270,7 @@ class PDDLTrajectoryDataset(Dataset):
     def get(self, idx: int) -> dict[str, object]:
         trajectory = self.trajectories[idx]
         parsed_problem = self.parsed_problems[trajectory.problem_index]
-        return {
+        sample: dict[str, object] = {
             "states": [
                 build_state_graph(parsed_problem, atoms, include_static=self.include_static)
                 for atoms in trajectory.states
@@ -134,6 +281,16 @@ class PDDLTrajectoryDataset(Dataset):
                 max_arity=self.max_action_arity,
             ),
         }
+        if self.action_supervision is not None:
+            sample["action_supervision"] = _build_action_supervision_sequence(
+                parsed_problem,
+                trajectory,
+                trajectory_index=idx,
+                max_action_arity=self.max_action_arity,
+                max_objects=self.max_objects,
+                config=self.action_supervision,
+            )
+        return sample
 
 
 class PDDLAtomTrajectoryDataset(Dataset):
@@ -159,6 +316,7 @@ class PDDLAtomTrajectoryDataset(Dataset):
         max_goal_atoms: int | None = None,
         seed: int = 0,
         negative_attempts_per_atom: int = 50,
+        action_supervision: ActionSupervisionConfig | None = None,
         transform=None,
         pre_transform=None,
     ) -> None:
@@ -182,6 +340,14 @@ class PDDLAtomTrajectoryDataset(Dataset):
         self.include_goal = include_goal
         self.include_terminal_state = include_terminal_state
         self.max_action_arity = _max_action_arity(self.parsed_problems)
+        self.max_objects = _max_objects(self.parsed_problems)
+        self.action_supervision = action_supervision
+        if action_supervision is not None:
+            _validate_action_supervision_dataset(
+                self.parsed_problems,
+                self.trajectories,
+                action_supervision,
+            )
         self.max_predicate_arity = _max_predicate_arity_for_problems(self.parsed_problems)
         self.max_goal_atoms = _max_goal_atoms(self.parsed_problems) if max_goal_atoms is None else max_goal_atoms
         self.seed = seed
@@ -221,6 +387,15 @@ class PDDLAtomTrajectoryDataset(Dataset):
             ),
             "atom_queries": _stack_tensor_dicts(atom_queries),
         }
+        if self.action_supervision is not None:
+            sample["action_supervision"] = _build_action_supervision_sequence(
+                parsed_problem,
+                trajectory,
+                trajectory_index=idx,
+                max_action_arity=self.max_action_arity,
+                max_objects=self.max_objects,
+                config=self.action_supervision,
+            )
         if self.include_goal:
             sample["goal"] = tensorize_goal_atoms(
                 parsed_problem,
@@ -474,6 +649,196 @@ def _tensorize_atom_queries(
         "atom_truth": truth,
         "atom_sample_mask": sample_mask,
     }
+
+
+def _max_objects(parsed_problems: Sequence[ParsedProblem]) -> int:
+    return max((len(parsed.objects) for parsed in parsed_problems), default=0)
+
+
+def _action_schema_signature(parsed_problem: ParsedProblem) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    return tuple(
+        (name, parsed_problem.actions[name].parameter_types)
+        for name in sorted(parsed_problem.actions)
+    )
+
+
+def _validate_ground_atom_for_problem(
+    parsed_problem: ParsedProblem,
+    atom: GroundAtom,
+    *,
+    key: ActionApplicabilityStateKey,
+) -> None:
+    context = (
+        f"oracle validation for problem {key.problem_index}, "
+        f"key {key!r}, atom {atom!r}"
+    )
+    if atom.predicate not in parsed_problem.predicates:
+        raise ValueError(f"{context}: unknown predicate {atom.predicate!r}")
+    schema = parsed_problem.predicates[atom.predicate]
+    if len(atom.arguments) != len(schema.arg_types):
+        raise ValueError(f"{context}: predicate {atom.predicate!r} has wrong arity")
+    for role_id, (object_name, required_type) in enumerate(
+        zip(atom.arguments, schema.arg_types, strict=True)
+    ):
+        if object_name not in parsed_problem.objects:
+            raise ValueError(f"{context}: unknown object {object_name!r}")
+        if parsed_problem.objects[object_name].type != required_type:
+            raise ValueError(
+                f"{context}: object {object_name!r} has wrong type at role {role_id}"
+            )
+
+
+def _validate_ground_action_for_problem(
+    parsed_problem: ParsedProblem,
+    action: GroundAction,
+    *,
+    key: ActionApplicabilityStateKey,
+) -> None:
+    context = (
+        f"oracle validation for problem {key.problem_index}, "
+        f"key {key!r}, action {action!r}"
+    )
+    if action.name not in parsed_problem.actions:
+        raise ValueError(f"{context}: unknown action schema {action.name!r}")
+    schema = parsed_problem.actions[action.name]
+    if len(action.arguments) != len(schema.parameter_types):
+        raise ValueError(f"{context}: action {action.name!r} has wrong arity")
+    for role_id, (object_name, required_type) in enumerate(
+        zip(action.arguments, schema.parameter_types, strict=True)
+    ):
+        if object_name not in parsed_problem.objects:
+            raise ValueError(f"{context}: unknown object {object_name!r}")
+        if parsed_problem.objects[object_name].type != required_type:
+            raise ValueError(
+                f"{context}: object {object_name!r} has wrong type at role {role_id}"
+            )
+
+
+def _validate_action_supervision_dataset(
+    parsed_problems: Sequence[ParsedProblem],
+    trajectories: Sequence[TrajectorySample],
+    config: ActionSupervisionConfig,
+) -> None:
+    action_lengths = {len(trajectory.actions) for trajectory in trajectories}
+    if 0 in action_lengths:
+        raise ValueError("action supervision requires every trajectory to contain an action")
+    if len(action_lengths) > 1:
+        raise ValueError("action supervision requires fixed-length trajectories")
+    for trajectory_index, trajectory in enumerate(trajectories):
+        if not 0 <= trajectory.problem_index < len(parsed_problems):
+            raise ValueError(
+                f"trajectory {trajectory_index} has out-of-range problem index"
+            )
+
+    signatures = {_action_schema_signature(parsed) for parsed in parsed_problems}
+    if len(signatures) > 1:
+        raise ValueError("action supervision requires compatible action schemas")
+
+    table = config.applicable_actions_by_state
+    if table is None:
+        return
+    if type(table) is not ActionApplicabilityTable:
+        raise TypeError("ActionSupervisionConfig did not normalize its oracle table")
+    for key, applicable_actions in table.items():
+        if key.problem_index >= len(parsed_problems):
+            raise ValueError(
+                f"oracle key has out-of-range problem index {key.problem_index}"
+            )
+        parsed_problem = parsed_problems[key.problem_index]
+        for atom in key.state_atoms:
+            _validate_ground_atom_for_problem(
+                parsed_problem,
+                atom,
+                key=key,
+            )
+        for action in applicable_actions:
+            _validate_ground_action_for_problem(
+                parsed_problem,
+                action,
+                key=key,
+            )
+
+
+def _action_supervision_seed(
+    base_seed: int,
+    problem_index: int,
+    state_atoms: Sequence[GroundAtom],
+    action: GroundAction,
+) -> int:
+    digest = hashlib.blake2b(digest_size=8)
+
+    def update_field(value: str) -> None:
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+
+    update_field(str(base_seed))
+    update_field(str(problem_index))
+    canonical_atoms = tuple(sorted(set(state_atoms)))
+    update_field(str(len(canonical_atoms)))
+    for atom in canonical_atoms:
+        update_field(atom.predicate)
+        update_field(str(len(atom.arguments)))
+        for argument in atom.arguments:
+            update_field(argument)
+    update_field(action.name)
+    update_field(str(len(action.arguments)))
+    for argument in action.arguments:
+        update_field(argument)
+    return int.from_bytes(digest.digest(), "big")
+
+
+def _build_action_supervision_sequence(
+    parsed_problem: ParsedProblem,
+    trajectory: TrajectorySample,
+    *,
+    trajectory_index: int,
+    max_action_arity: int,
+    max_objects: int,
+    config: ActionSupervisionConfig,
+) -> dict[str, torch.Tensor]:
+    table = config.applicable_actions_by_state
+    outputs: list[dict[str, torch.Tensor]] = []
+    for step_index, true_action in enumerate(trajectory.actions):
+        current_atoms = trajectory.states[step_index]
+        applicability_labeler = None
+        if table is not None:
+            state_key = action_applicability_state_key(
+                trajectory.problem_index,
+                current_atoms,
+            )
+            try:
+                applicable_actions = table[state_key]
+            except KeyError:
+                pass
+            else:
+                if true_action not in applicable_actions:
+                    raise ValueError(
+                        "offline applicability table contradicts trace action "
+                        f"at problem {trajectory.problem_index}, "
+                        f"trajectory {trajectory_index}, step {step_index}"
+                    )
+                applicability_labeler = applicable_actions.__contains__
+        outputs.append(
+            build_action_supervision_tensors(
+                parsed_problem,
+                true_action,
+                max_action_arity=max_action_arity,
+                max_objects=max_objects,
+                num_negatives=config.num_negatives,
+                seed=_action_supervision_seed(
+                    config.seed,
+                    trajectory.problem_index,
+                    current_atoms,
+                    true_action,
+                ),
+                applicability_labeler=applicability_labeler,
+                max_random_attempts_per_category=(
+                    config.max_random_attempts_per_category
+                ),
+            )
+        )
+    return _stack_tensor_dicts(outputs)
 
 
 def _max_action_arity(parsed_problems: Sequence[ParsedProblem]) -> int:
