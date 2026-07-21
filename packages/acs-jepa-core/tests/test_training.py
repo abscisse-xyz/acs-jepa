@@ -522,6 +522,17 @@ def test_jepa_trainer_integrated_applicability_uses_one_positive_and_known_negat
     assert torch.allclose(output.total_loss, 1.9 * output.applicability_loss)
     assert loss_module.labels is not None
     assert loss_module.labels.tolist() == [1.0, 0.0, 1.0]
+    assert output.terms["applicability_num_examples"].item() == 3
+    assert output.terms["applicability_num_positive"].item() == 2
+    assert output.terms["applicability_num_negative"].item() == 1
+    assert all(
+        not output.terms[name].requires_grad
+        for name in (
+            "applicability_num_examples",
+            "applicability_num_positive",
+            "applicability_num_negative",
+        )
+    )
     assert head.argument_mask is not None
     assert head.argument_mask.shape == (3, 4)
     supervision["negative_applicability_label_mask"][0, 0, 1] = False

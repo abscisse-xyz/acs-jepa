@@ -670,6 +670,15 @@ def _add_applicability_terms(terms: dict[str, Tensor], output: ApplicabilityLoss
         terms["applicability_negative_logit_mean"] = output.negative_logit_mean.detach()
     if output.positive_negative_margin is not None:
         terms["applicability_positive_negative_margin"] = output.positive_negative_margin.detach()
+    terms["applicability_num_examples"] = output.total.detach().new_tensor(
+        float(output.num_examples)
+    )
+    terms["applicability_num_positive"] = output.total.detach().new_tensor(
+        float(output.num_positive)
+    )
+    terms["applicability_num_negative"] = output.total.detach().new_tensor(
+        float(output.num_negative)
+    )
 
 
 def _dense_source_object_bank(
