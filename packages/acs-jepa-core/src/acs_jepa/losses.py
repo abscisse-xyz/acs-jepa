@@ -81,6 +81,19 @@ class ActionVICRegLossOutput:
     num_samples: int
 
 
+@dataclass(frozen=True)
+class ActionContrastiveLossOutput:
+    """Scalar action contrastive loss terms and ranking diagnostics."""
+
+    total: Tensor
+    positive_similarity_mean: Tensor
+    hardest_negative_similarity_mean: Tensor
+    positive_negative_margin: Tensor
+    top1_accuracy: Tensor
+    num_examples: int
+    num_negatives: int
+
+
 class ApplicabilityLoss(nn.Module):
     """Binary cross-entropy objective for applicability logits.
 
@@ -298,6 +311,130 @@ class ActionVICRegLoss(nn.Module):
             std_penalty=std_penalty,
             covariance_penalty=covariance_penalty,
             num_samples=samples.size(0),
+        )
+
+
+def _stable_l2_normalize(x: Tensor) -> Tensor:
+    """Normalize final-dimension vectors without finite-value overflow."""
+
+    scale = x.abs().amax(dim=-1, keepdim=True)
+    scaled = x / scale
+    return scaled / torch.linalg.vector_norm(scaled, dim=-1, keepdim=True)
+
+
+def _validate_action_vector_norms(x: Tensor, *, min_norm: float = 1.0e-12) -> None:
+    """Reject vectors at or below ``min_norm`` without overflowing large norms."""
+
+    max_abs = x.abs().amax(dim=-1)
+    possibly_small = max_abs <= min_norm
+    if bool(possibly_small.any().item()):
+        small_norms = torch.linalg.vector_norm(x[possibly_small], dim=-1)
+        if bool((small_norms <= min_norm).any().item()):
+            raise ValueError(f"every action vector norm must be greater than {min_norm}")
+
+
+class ActionContrastiveLoss(nn.Module):
+    """Cosine InfoNCE over one positive and explicit negatives per anchor.
+
+    Inputs are normalized with an overflow-safe scaled L2 norm. Float16 and
+    bfloat16 inputs are evaluated in float32; float64 inputs remain float64.
+    The helper constructs no anchors or negatives and does not detach any input.
+
+    Args:
+        temperature: Finite positive softmax temperature. It must also be
+            representable in the forward-pass compute dtype.
+    """
+
+    def __init__(self, *, temperature: float = 0.1) -> None:
+        super().__init__()
+        if not math.isfinite(temperature) or temperature <= 0.0:
+            raise ValueError("temperature must be finite and positive")
+        self.temperature = float(temperature)
+
+    def forward(
+        self,
+        anchor_latents: Tensor,
+        positive_action_latents: Tensor,
+        negative_action_latents: Tensor,
+        negative_mask: Tensor | None = None,
+    ) -> ActionContrastiveLossOutput:
+        """Score ``[N,D_a]`` anchors/positives against ``[N,M,D_a]`` negatives."""
+
+        if anchor_latents.dim() != 2 or positive_action_latents.dim() != 2:
+            raise ValueError("anchor and positive latent shapes must be rank-2 [N, D_a]")
+        if negative_action_latents.dim() != 3:
+            raise ValueError("negative latent shape must be rank-3 [N, M, D_a]")
+        if anchor_latents.shape != positive_action_latents.shape:
+            raise ValueError("anchor and positive latent shapes must match")
+        num_examples, action_dim = anchor_latents.shape
+        if (
+            num_examples == 0
+            or action_dim == 0
+            or negative_action_latents.size(1) == 0
+            or negative_action_latents.size(0) != num_examples
+            or negative_action_latents.size(2) != action_dim
+        ):
+            raise ValueError("latent shapes must have matching non-empty N, M, and D_a dimensions")
+        latent_tensors = (anchor_latents, positive_action_latents, negative_action_latents)
+        if not all(torch.is_floating_point(value) for value in latent_tensors):
+            raise ValueError("all latent tensors must be floating point")
+        if len({value.dtype for value in latent_tensors}) != 1:
+            raise ValueError("all latent tensors must have the same dtype")
+        if len({value.device for value in latent_tensors}) != 1:
+            raise ValueError("all latent tensors must be on the same device")
+        if not all(bool(torch.isfinite(value).all().item()) for value in latent_tensors):
+            raise ValueError("all latent tensors must contain only finite values")
+        if negative_mask is not None:
+            if negative_mask.dtype != torch.bool:
+                raise ValueError("negative_mask must have bool dtype")
+            if negative_mask.shape != negative_action_latents.shape[:2]:
+                raise ValueError("negative_mask shape must be [N, M]")
+            if negative_mask.device != anchor_latents.device:
+                raise ValueError("negative_mask must be on the latent device")
+            if not bool(negative_mask.any(dim=1).all().item()):
+                raise ValueError("every example must retain at least one active negative")
+
+        compute_dtype = torch.float64 if anchor_latents.dtype == torch.float64 else torch.float32
+        if self.temperature < torch.finfo(compute_dtype).tiny:
+            raise ValueError("temperature is too small for the contrastive compute dtype")
+        anchor_values = anchor_latents.to(dtype=compute_dtype)
+        positive_values = positive_action_latents.to(dtype=compute_dtype)
+        negative_values = negative_action_latents.to(dtype=compute_dtype)
+        for values in (anchor_values, positive_values, negative_values):
+            _validate_action_vector_norms(values)
+        anchors = _stable_l2_normalize(anchor_values)
+        positives = _stable_l2_normalize(positive_values)
+        negatives = _stable_l2_normalize(negative_values)
+        positive_similarity = (anchors * positives).sum(dim=-1)
+        negative_similarity = torch.einsum("nd,nmd->nm", anchors, negatives)
+        if negative_mask is None:
+            active_mask = torch.ones_like(negative_similarity, dtype=torch.bool)
+        else:
+            active_mask = negative_mask
+        masked_negative_similarity = negative_similarity.masked_fill(~active_mask, float("-inf"))
+        logits = torch.cat(
+            (positive_similarity.unsqueeze(1), masked_negative_similarity),
+            dim=1,
+        )
+        targets = torch.zeros(anchor_latents.size(0), dtype=torch.long, device=anchor_latents.device)
+        scaled_logits = logits / self.temperature
+        active_logit_mask = torch.cat(
+            (torch.ones_like(active_mask[:, :1]), active_mask),
+            dim=1,
+        )
+        if not bool(torch.isfinite(scaled_logits[active_logit_mask]).all().item()):
+            raise ValueError("temperature produced non-finite active contrastive logits")
+        total = F.cross_entropy(scaled_logits, targets)
+        hardest_negative = masked_negative_similarity.max(dim=1).values
+        margin = positive_similarity - hardest_negative
+        return ActionContrastiveLossOutput(
+            total=total,
+            positive_similarity_mean=positive_similarity.mean(),
+            hardest_negative_similarity_mean=hardest_negative.mean(),
+            positive_negative_margin=margin.mean(),
+            top1_accuracy=(margin > 0).to(dtype=positive_similarity.dtype).mean(),
+            num_examples=anchor_latents.size(0),
+            num_negatives=int(active_mask.sum().item()),
         )
 
 
