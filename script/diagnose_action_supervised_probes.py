@@ -32,6 +32,7 @@ from action_diag_common import (
     write_json,
 )
 from action_negative_sampling import sample_action_negatives
+from action_phase0_common import tie_aware_auroc, tie_aware_average_precision
 from torch import Tensor
 
 SUMMARY_KEYS = frozenset(
@@ -461,29 +462,7 @@ def binary_metrics(logits: Tensor, labels: Tensor) -> dict[str, object]:
 
 def _average_precision(logits: Tensor, positive_labels: Tensor) -> float:
     """Integrate precision at complete descending equal-score group boundaries."""
-
-    order = torch.argsort(logits, descending=True, stable=True)
-    sorted_scores = logits[order]
-    sorted_positive = positive_labels[order]
-    total_positive = int(sorted_positive.sum())
-    cumulative_tp = 0
-    cumulative_fp = 0
-    previous_recall = 0.0
-    average_precision = 0.0
-    start = 0
-    while start < sorted_scores.numel():
-        end = start + 1
-        while end < sorted_scores.numel() and sorted_scores[end] == sorted_scores[start]:
-            end += 1
-        group_tp = int(sorted_positive[start:end].sum())
-        cumulative_tp += group_tp
-        cumulative_fp += end - start - group_tp
-        recall = cumulative_tp / total_positive
-        precision = cumulative_tp / (cumulative_tp + cumulative_fp)
-        average_precision += (recall - previous_recall) * precision
-        previous_recall = recall
-        start = end
-    return average_precision
+    return tie_aware_average_precision(logits, positive_labels)
 
 
 def applicability_metrics(
@@ -526,9 +505,7 @@ def applicability_metrics(
     metrics.update(
         {
             "margin": _distribution(margins),
-            "margin_by_category": {
-                category: _distribution(values) for category, values in sorted(by_category.items())
-            },
+            "margin_by_category": {category: _distribution(values) for category, values in sorted(by_category.items())},
             "per_category": per_category,
         }
     )
@@ -536,11 +513,7 @@ def applicability_metrics(
 
 
 def _binary_auroc(positive: Tensor, negative: Tensor) -> float | None:
-    if positive.numel() == 0 or negative.numel() == 0:
-        return None
-    comparisons = positive[:, None] - negative[None, :]
-    scores = (comparisons > 0).to(torch.float64) + 0.5 * (comparisons == 0).to(torch.float64)
-    return float(scores.mean())
+    return tie_aware_auroc(positive, negative)
 
 
 def _distribution(values: Sequence[float]) -> dict[str, float | int | None]:
@@ -588,9 +561,7 @@ def decision_projection(summary: dict[str, Any]) -> dict[str, Any]:
     """Retain every decision value except the six fixed runtime/path pointers."""
 
     if set(summary) != SUMMARY_KEYS:
-        raise ValueError(
-            f"summary top-level keys must be exactly {sorted(SUMMARY_KEYS)}; got {sorted(summary)}"
-        )
+        raise ValueError(f"summary top-level keys must be exactly {sorted(SUMMARY_KEYS)}; got {sorted(summary)}")
     projection = copy.deepcopy(summary)
     for key in ("dataset", "checkpoint", "device", "runtime_seconds", "environment"):
         del projection[key]
@@ -658,9 +629,7 @@ def argument_head_metrics(
     active_targets = targets[argument_mask]
     if bool(((active_targets < 0) | (active_targets >= logits.size(2))).any()):
         raise ValueError("active target must index the object bank")
-    if active_targets.numel() and not bool(
-        candidate_mask[batch_indices, role_indices, active_targets].all()
-    ):
+    if active_targets.numel() and not bool(candidate_mask[batch_indices, role_indices, active_targets].all()):
         raise ValueError("active target must be true in candidate_mask")
     if not bool(torch.isfinite(logits[candidate_mask]).all()):
         raise ValueError("valid candidate logits must be finite")
@@ -668,9 +637,7 @@ def argument_head_metrics(
     return {
         "overall": _argument_metric_subset(logits, targets, argument_mask, candidate_mask),
         "per_role": {
-            str(role): _argument_metric_subset(
-                logits, targets, argument_mask & (role_grid == role), candidate_mask
-            )
+            str(role): _argument_metric_subset(logits, targets, argument_mask & (role_grid == role), candidate_mask)
             for role in range(4)
         },
     }
@@ -687,9 +654,7 @@ def evaluate_checkpoint_argument_head(
     """Pad trace examples and invoke the untouched production head exactly once."""
 
     batch_size = action_latents.size(0)
-    if not (
-        len(object_banks) == len(targets) == len(argument_masks) == len(candidate_masks) == batch_size
-    ):
+    if not (len(object_banks) == len(targets) == len(argument_masks) == len(candidate_masks) == batch_size):
         raise ValueError("argument-head inputs must have matching batch sizes")
     max_objects = max(bank.size(0) for bank in object_banks)
     max_roles = targets[0].numel()
@@ -811,10 +776,7 @@ def stack_role_examples(
     """Flatten active argument slots and pad problem-local object banks."""
 
     rows = [
-        (example, role)
-        for example in examples
-        for role, active in enumerate(example.argument_mask)
-        if bool(active)
+        (example, role) for example in examples for role, active in enumerate(example.argument_mask) if bool(active)
     ]
     if not rows:
         raise ValueError("probe examples contain no active action arguments")
@@ -861,9 +823,7 @@ def _evaluate_checkpoint_applicability_head(
         inputs, labels, groups, categories = _applicability_dataset(examples)
         with torch.no_grad():
             logits = _applicability_logits(head, inputs)
-        output[name] = applicability_metrics(
-            logits, labels, group_ids=groups, categories=categories
-        )
+        output[name] = applicability_metrics(logits, labels, group_ids=groups, categories=categories)
     return output
 
 

@@ -96,3 +96,59 @@ The reviewer accepted the artifacts, formulas, repeatability, suites, and static
 - Authorization: verified SSH-signed Stage 0A commit authorized; Stages 0B–0D remain unauthorized.
 
 The reviewer independently reproduced the exact fixed population identity, verified the correction RED/GREEN timestamps and outputs, proved the tested enumeration adapter is consumed by extraction, found no Stage 0A simulator/oracle/replay dependency, established copied helper equivalence against the prior diagnostic helpers, revalidated corrected official evidence and repeatability, and passed focused, core, scoped CLI, Ruff, `compileall`, and diff checks.
+
+## Stage 0B Implementation-Plan Review 1 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_82983d13`
+- Authorization: Stage 0B implementation not authorized.
+
+The reviewer confirmed that current APIs and fixed CityCar vocabularies support the 64/128/388/217/605 feature ladder, the pinned 453/151 split, and simulator-free recorded-state construction. Blockers were literal feature names; exact population preprocessing and zero-variance behavior; per-fit RNG/control-permutation sequencing; arithmetic-median, global-threshold, and control-label metric semantics; absent control-model serialization/reconstruction; checkpoint/output/root binding; and unsafe direct reuse of the simulator-transitive Phase 2G entry point. Sections 5 and 8 were amended to fix every behavior before re-review.
+
+## Stage 0B Implementation-Plan Review 2 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_c5f2c62a`
+- Authorization: Stage 0B implementation not authorized.
+
+Review 1 corrections were accepted, but two shared-contract contradictions remained: §3.1 still named the simulator-transitive loader while Stage 0B required the accepted simulator-free loader, and §3.3 described two fits although §§5/8 required two original-label probes plus one control MLP per feature. Section 3 now names `action_phase0_common.load_checkpoint_bundle` for Updated Phase 0 and pins exactly 15 A–E/linear-MLP-control fits.
+
+## Stage 0B Implementation-Plan Review 3 — PASS
+
+- Date: 2026-07-22
+- Delegation: `deleg_8d8faf37`
+- Authorization: Stage 0B implementation only; Stage 0C, Stage 0D, and evidence acceptance remain unauthorized.
+
+The reviewer confirmed simulator-free loader/restoration equivalence, exact two-original-plus-one-control semantics and 15-fit order, consistency of all logits/model-state/reconstruction contracts, preservation of accepted Stage 0A behavior, and resolution of all prior blockers. Stage 0B may proceed under strict vertical RED/GREEN.
+
+## Stage 0B Implementation/Evidence Review 1 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_74eba911`
+- Authorization: signed Stage 0B commit not authorized.
+
+The reviewer independently accepted the immutable inputs, canonical schemas, strict restoration, pinned split, fifteen-model reconstruction (maximum logit error `0.0`), metric/verdict recomputation, repeat identities, simulator-free call graph, full suites, and static checks. Commit remained blocked because static-fact validation compared the source tuple to itself rather than atoms independently reconstructed from the actual `include_static=True` graph, optimizer-step count was not mutation-tested, prefix/source-state causality lacked a behavioral mutation, and label/category/future/split mutation coverage did not exercise the extraction boundary. Corrections and their RED/GREEN evidence are recorded in `.hermes/plans/2026-07-22_103957-stage0b-red-green.md`.
+
+## Stage 0B Implementation/Evidence Review 2 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_d8653336`
+- Authorization: signed Stage 0B commit not authorized.
+
+Review 1 corrections were accepted: all 128 actual graph atoms reconstructed, static filtering failed before encode, exact validated `Data` identity reached JEPA, actual extraction-boundary causality passed, corrected evidence genuinely reran and matched, and all 15 probes reconstructed over 604 rows with zero logit error. Two test-contract gaps remained: optimizer tests counted updates but did not assert that every loss/update consumed the complete train population, and graph reconstruction ignored unmatched reverse-only edges instead of validating the exact bidirectional edge multiset. Both require behavioral regression correction before another evidence review.
+
+## Stage 0B Implementation/Evidence Review 3 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_c3b089eb`
+- Authorization: signed Stage 0B commit not authorized.
+
+The exact graph-edge blocker was accepted, including all seven adversarial mutations and valid 128-atom reconstruction. Evidence, 9,060-logit reconstruction per checkpoint, suites, runtime boundaries, and archives also passed. The sole remaining blocker was mutation sensitivity of full-batch training coverage: the test asserted full tensor shapes but not exact preprocessed feature values and original/control targets in canonical row order. A same-shape drop-row/duplicate-row mutant survived. The fit regression must inspect exact forward inputs and BCE target values for every A–E/model/epoch update.
+
+## Stage 0B Implementation/Evidence Review 4 — PASS
+
+- Date: 2026-07-22
+- Delegation: `deleg_b081c32c`
+- Authorization: one verified SSH-signed Stage 0B commit; Stage 0C, Stage 0D, branch selection, and later work remain unauthorized.
+
+The reviewer verified exact full-train forward tensors and original/control BCE targets for all `15 × epochs` calls, including same-shape duplicate-row mutation sensitivity. All prior graph, causality, simulator-free, schema, fitting, metric, reconstruction, and repeatability contracts remained accepted. All 9,060 logits per checkpoint reconstructed with maximum absolute error `0.0`; focused Stage 0B, core, scoped CLI, Ruff, `compileall`, and whitespace checks passed. The reviewed tracked diff SHA-256 was `5445cfad4aea8ad87233396a30e6369f6ed602f3aa7f2043e8b9fa2a849d6038` before this mechanical verdict-record append.

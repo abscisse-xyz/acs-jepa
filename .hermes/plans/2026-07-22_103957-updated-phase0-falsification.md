@@ -80,7 +80,7 @@ No paper determines ACS-JEPA thresholds; thresholds below come from the updated 
 
 ### 3.1 Checkpoint restoration
 
-Reuse `script/action_diag_common.py::load_checkpoint_bundle(..., include_restoration_metadata=True)`. Baseline must report JEPA and goal head `restored`, with contrastive/argument/applicability modules `disabled`. Phase 2 must report all five modules `restored`. Missing, null, incompatible, or unexpected restoration states invalidate evidence before gate calculation.
+Reuse the simulator-free `script/action_phase0_common.py::load_checkpoint_bundle(..., include_restoration_metadata=True)` for every Updated Phase 0 diagnostic. It is the accepted strict-equivalent extraction of the prior diagnostic loader and must not import `action_diag_common.py`, `acs_jepa_cli.cli`, replay, simulator, applicability-oracle, or live applicability code. Baseline must report JEPA and goal head `restored`, with contrastive/argument/applicability modules `disabled`. Phase 2 must report all five modules `restored`. Missing, null, incompatible, or unexpected restoration states invalidate evidence before gate calculation.
 
 Every module is in eval mode; model parameters have `requires_grad=False` during extraction; official extraction runs inside `torch.inference_mode()`.
 
@@ -95,10 +95,13 @@ The split has exactly 453 train and 151 evaluation records. Its identity bytes a
 
 ### 3.3 Probe models
 
-For each feature set in Stage 0B, train exactly two fixed probes:
+For each feature set in Stage 0B, fit exactly three fixed probes, totaling 15 fits in A–E then listed-model order:
 
-- `linear`: one `torch.nn.Linear(input_dim, 1)`;
-- `mlp`: `Linear(input_dim,64) -> ReLU -> Linear(64,1)`.
+- original-label `linear`: one `torch.nn.Linear(input_dim, 1)`;
+- original-label `mlp`: `Linear(input_dim,64) -> ReLU -> Linear(64,1)`;
+- permuted-label `control_mlp`: the same MLP architecture, trained against the one fixed control permutation.
+
+The first two are the exactly two original-label probes per feature set; the third is the diagnostic control, not a third original-label model.
 
 Fixed training contract: CPU, float32, Adam, 200 epochs, learning rate `0.001`, no weight decay, full train set in canonical manifest order, seed `20260717`, one thread, deterministic algorithms enabled. Continuous features are standardized using train-only mean/std with zero-std dimensions mapped to zero; binary/mask features remain `{0,1}` and are not standardized. Labels never enter standardization.
 
@@ -247,6 +250,45 @@ All features are derived from the same source state and grounded candidate; dime
 
 The ordered feature-name list is fixed by these rules, emitted before fitting, and SHA-256 identified. No parser/schema extension is needed: the adapter uses existing `ParsedProblem.actions`, `types`, `predicates`, `objects`, and recorded `GroundAtom` states. Any live problem whose sorted vocabularies differ from the exact CityCar contract above invalidates official evidence.
 
+#### 5.2.1 Literal feature names and index partitions
+
+Feature-name strings are ASCII and exactly:
+
+- latent coordinates: `action_latent[0]` through `action_latent[63]` and `graph_latent[0]` through `graph_latent[63]`;
+- selected objects: `selected_object_latent[<role>][<coordinate>]`, role-major for roles `0..3`, then coordinates `0..63`;
+- argument masks: `argument_present[<role>]`, roles `0..3`;
+- schema: `schema=<schema>`, in the seven-schema order above;
+- active roles: `role_active[<role>]`, roles `0..3`;
+- equality: `role_equal[<left>,<right>]`, in the six pair order above;
+- role types: `role_type[<role>]=<type>`, role-major then type order above;
+- bound facts: `fact:<predicate>(<comma-separated role indices>)`, in predicate order then the exact `itertools.product` tuple order above; examples are `fact:clear(0)` and `fact:road_connect(0,1,2)`. There are no spaces, and repeated role indices are retained literally.
+
+Each feature set uses these exact concatenated names in §5.2 order. Index partitions are fixed:
+
+- A: `standardized_indices=0..63`, no binary indices;
+- B: `standardized_indices=0..127`, no binary indices;
+- C: `standardized_indices=0..383`, `binary_indices=384..387`;
+- D: no standardized indices, `binary_indices=0..216`;
+- E: `standardized_indices=0..383`, `binary_indices=384..604`.
+
+#### 5.2.2 Preprocessing, fitting RNG, controls, and metrics
+
+For each feature set, preprocessing is fitted only on the 453 train rows. Continuous-column mean and population standard deviation use CPU float64 accumulation with `torch.mean` and `torch.std(correction=0)`. A continuous column is zero variance iff the resulting float64 standard deviation is exactly `0.0`; it remains in `standardized_indices`, is also listed in `zero_std_indices`, uses serialized divisor `1.0`, and therefore maps exactly to zero. Binary dimensions are not centered/scaled and serialize mean `0.0`, std `1.0`. Apply float64 preprocessing first, then cast the fitted inputs to CPU `torch.float32`. All full-dimension mean/std arrays are serialized as finite JSON numbers.
+
+There are exactly 15 fits in feature-set order A–E and, within each feature, model order `linear`, `mlp`, `control_mlp`. Before constructing each model, call `torch.manual_seed(20260717)`; each fit therefore has an independently reset initialization/training RNG. Models use full-batch CPU Adam for exactly 200 optimizer steps, BCE-with-logits mean loss, no scheduler, no early stopping, no shuffling, and the optimizer/dtype contract in §8.2. The one control permutation is constructed once as `train_labels[torch.randperm(453, generator=torch.Generator(device="cpu").manual_seed(20260717))]` in pinned train-manifest order and is reused by all five control MLPs.
+
+Thresholds are selected only on train rows from candidate logits `{+inf} U unique(train_logits) U {-inf}` by maximizing F1; predictions are positive iff logit `>= threshold`; ties choose the numerically highest threshold. Original probes select against original train labels. Control probes select against permuted train labels. Original train/eval/per-schema/category metrics use original labels. Control train metrics use permuted labels, while control eval/per-schema/category metrics use original labels. Every per-schema metric uses its probe's single globally selected train threshold; no per-schema threshold is fitted.
+
+AUROC and AP use complete equal-logit tie groups in float64. NLL is mean binary cross-entropy from logits in float64; Brier is mean squared probability error in float64. Reliability bins are left-inclusive/right-exclusive except the final bin, which includes `1.0`. A category margin is computed within each group as the trace/applicable logit minus each matching inapplicable category logit; its reported median is the arithmetic median after float64 sorting (average of the two middle values for even counts). Empty distributions follow §8's nullable rule.
+
+All 15 fitted models, including controls, are serialized in `probe_states.json`. Reconstruction must reproduce all 15 `details.json` logits within `atol=1e-7,rtol=0`; Stage 0D imports only the ten original-label models but the assessor validates all 15.
+
+#### 5.2.3 Simulator-free reuse and output binding
+
+Stage 0B must not import `diagnose_action_supervised_probes.py`, because that entry point has a transitive replay/oracle path. Move only its pure equal-tie AUROC/AP helpers into the simulator-free common module, make the old entry point import those helpers, and add regression tests proving its pre-existing Phase 2G helper outputs are exactly unchanged. No replay, simulator construction, applicability query, future state, or oracle module may enter the Stage 0B import/call graph.
+
+The CLI validates `root_identity.json` before extraction. Baseline checkpoint/config are accepted only under `recoverability/baseline/{run1,run2}` and Phase 2 checkpoint/config only under `recoverability/phase2/{run1,run2}`. The final component must be literal `run1` or `run2`; all other destinations fail. A missing/changed root marker or an existing current destination fails before computation, while unrelated completed destinations are allowed and unchanged.
+
 ### 5.3 RED/GREEN tests
 
 1. RED/GREEN each feature set’s exact tensor composition, role ordering, dimensions, and names.
@@ -255,7 +297,9 @@ The ordered feature-name list is fixed by these rules, emitted before fitting, a
 4. Raw bound-fact indicators match hand-derived positive, absent, static, repeated-role, inactive-role, and type-incompatible CityCar fixtures and never import/call a simulator.
 5. Train-only standardization and decision-threshold selection are frozen before eval; eval-label mutation cannot alter either.
 6. Exact AUROC/AP tie groups, all-positive/all-negative per-schema nulls, threshold-selected-F1 tie-break, NLL/Brier/reliability bins, category margins, and count reconciliation.
-7. Two invocations produce identical decision projections; control-label probe uses only the deterministic permuted train labels.
+7. Two invocations produce identical decision projections; control-label probe uses only the single deterministic permuted train-label vector defined in §5.2.2.
+8. Literal feature-name and index-partition tests cover every coordinate and all 184 bound-fact names; population-std, exact-zero handling, independent per-fit RNG reset, full-batch update count, and all 15 reconstructed logits are mutation-tested.
+9. Arithmetic even-count medians, global-threshold reuse for per-schema metrics, original-versus-control label semantics, root/checkpoint/output binding, no prohibited transitive imports, and unchanged Phase 2G pure metric outputs are behavioral RED/GREEN contracts.
 
 ### 5.4 Official commands and outputs
 
@@ -286,7 +330,7 @@ UV_CACHE_DIR=/opt/data/workspace/.uv-cache uv run --package acs-jepa-cli python 
 Outputs: `summary.json`, `details.json`, `feature_schema.json`, `split_manifest.json`, and `probe_states.json`.
 
 - `details.json` contains all 604 rows (train and eval), each model’s original-label logit, control-label logit, split, and immutable metadata; Stage 0D therefore has accepted train/eval component scores without refitting.
-- `probe_states.json` canonically serializes all ten original-label probes as exact architecture metadata, train-only preprocessing tensors, plus sorted state-dict tensor names, shapes, dtypes, and row-major finite float values. Stage 0D strictly reconstructs preprocessing and these CPU modules, verifies that recomputed logits exactly match `details.json` within `atol=1e-7, rtol=0`, and never trains them again.
+- `probe_states.json` canonically serializes all fifteen probes (ten original-label and five control MLPs) as exact architecture metadata, train-only preprocessing tensors, plus sorted state-dict tensor names, shapes, dtypes, and row-major finite float values. Stage 0D reconstructs and imports only the ten original-label probes and never trains them again; the final assessor reconstructs all fifteen and verifies every `details.json` logit within `atol=1e-7, rtol=0`.
 - `feature_schema.json` contains exact ordered feature names/dimensions and standardization indices; `split_manifest.json` contains the pinned arrays/identity from §3.2.
 
 All four non-summary artifacts contain no run path, runtime, platform, or version metadata and must be byte-identical between `run1` and `run2`.
@@ -529,7 +573,7 @@ UV_CACHE_DIR=/opt/data/workspace/.uv-cache uv run --package acs-jepa-cli python 
   --output /opt/data/workspace/acs-jepa-runs/smoke/action_auxiliary_seed0/updated_phase0/assessment
 ```
 
-The assessor discovers each ranking summary’s five bound Stage 0B files from `settings.recoverability_inputs`, requires those paths to be the matching fixed checkpoint’s accepted Stage 0B run1 siblings already supplied to assessment, recomputes all file identities, validates their complete schemas, reconstructs all ten probes plus preprocessing, and reproduces all 604 Stage 0B logits at `atol=1e-7,rtol=0`. It then requires exact JSON-number equality for each of the 151 imported `latent_applicability`, `raw_symbolic`, and `hybrid` ranking scores against the matching Stage 0B details rows. Any checkpoint or accepted-run1 path mismatch, identity mismatch, failed reconstruction, or score mismatch is fatal.
+The assessor discovers each ranking summary’s five bound Stage 0B files from `settings.recoverability_inputs`, requires those paths to be the matching fixed checkpoint’s accepted Stage 0B run1 siblings already supplied to assessment, recomputes all file identities, validates their complete schemas, reconstructs all fifteen probes plus preprocessing, and reproduces all 604 Stage 0B logits at `atol=1e-7,rtol=0`. Stage 0D itself imports only the ten original-label probes; the assessor additionally reconstructs the five controls. It then requires exact JSON-number equality for each of the 151 imported `latent_applicability`, `raw_symbolic`, and `hybrid` ranking scores against the matching Stage 0B details rows. Any checkpoint or accepted-run1 path mismatch, identity mismatch, failed reconstruction, or score mismatch is fatal.
 
 Exit semantics:
 
@@ -569,7 +613,7 @@ Every `per_schema` dynamic map has exactly the seven literal schema keys in §5.
 - Recoverability `details.json` is a list of exactly 604 objects in manifest order with exactly `manifest_index,group,problem,step,action,category,label,split,logits,control_logits`; `logits` has exactly the ten keys `A_action/linear`, `A_action/mlp`, `B_graph_action/linear`, `B_graph_action/mlp`, `C_selected_graph_action/linear`, `C_selected_graph_action/mlp`, `D_raw_symbolic/linear`, `D_raw_symbolic/mlp`, `E_hybrid/linear`, `E_hybrid/mlp`; `control_logits` has exactly the five corresponding `/mlp` keys.
 - `feature_schema.json` has exactly `schema_version,candidate_manifest_sha256,feature_sets`; `schema_version` is exactly `action_latent_updated_phase0.feature_schema.v1`; `feature_sets` is a five-item list in A–E order, each exactly `name,dimension,feature_names,binary_indices,standardized_indices`, with dimensions derived in §5.2 and indices sorted/disjoint/reconciling all dimensions.
 - `split_manifest.json` has exactly `eval_groups,train_groups`; its bytes/hash are exactly §3.2.
-- `probe_states.json` has exactly `schema_version,candidate_manifest_sha256,split_manifest_sha256,training,models`; `schema_version` is exactly `action_latent_updated_phase0.probe_states.v1`; `training` exactly `seed,epochs,learning_rate,hidden_dim,optimizer,dtype`, where optimizer is exactly `Adam(lr=0.001,betas=(0.9,0.999),eps=1e-08,weight_decay=0,amsgrad=False)` and dtype is exactly `torch.float32`; `models` is ten objects in A–E then linear/MLP order, each exactly `feature_set,model_kind,input_dim,architecture,preprocessing,state_dict`; for `model_kind:"linear"`, `architecture` has exactly `name:"linear",input_dim:<matching int>,output_dim:1,bias:true`; for `model_kind:"mlp"`, it has exactly `name:"mlp",input_dim:<matching int>,hidden_dim:64,output_dim:1,activation:"relu",bias:true`; `preprocessing` has exactly `mean,std,binary_indices,standardized_indices,zero_std_indices`, where mean/std are full input-dimension finite arrays fitted on train only, binary dimensions use mean `0`/std `1`, and zero-std continuous dimensions are listed and map to zero; `state_dict` is a sorted list of records exactly `name,shape,dtype,values`, and every tensor dtype is exactly `torch.float32`.
+- `probe_states.json` has exactly `schema_version,candidate_manifest_sha256,split_manifest_sha256,training,models`; `schema_version` is exactly `action_latent_updated_phase0.probe_states.v1`; `training` exactly `seed,epochs,learning_rate,hidden_dim,optimizer,dtype`, where optimizer is exactly `Adam(lr=0.001,betas=(0.9,0.999),eps=1e-08,weight_decay=0,amsgrad=False)` and dtype is exactly `torch.float32`; `models` is fifteen objects in A–E then `linear`,`mlp`,`control_mlp` order. Each model object has exactly `feature_set,model_kind,input_dim,architecture,preprocessing,state_dict`; `model_kind` is exactly `"linear"|"mlp"|"control_mlp"`. For `linear`, `architecture` has exactly `name:"linear",input_dim:<matching int>,output_dim:1,bias:true`; for `mlp` and `control_mlp`, it has exactly `name:"mlp",input_dim:<matching int>,hidden_dim:64,output_dim:1,activation:"relu",bias:true`. `preprocessing` has exactly `mean,std,binary_indices,standardized_indices,zero_std_indices`, obeys §5.2.2, and is byte-identical across the three models for one feature set; mean/std are full input-dimension finite arrays fitted on train only, binary dimensions use mean `0`/std `1`, and zero-std continuous dimensions are listed, serialize divisor `1.0`, and map to zero. `state_dict` is a sorted list of records exactly `name,shape,dtype,values`, and every tensor dtype is exactly `torch.float32`.
 - Transition-equivalence `details.json` is a list of exactly 44 objects with exactly `group,problem,step,trace_action,status,skip_reason,wrong_action,wrong_category,wrong_unit_action_l2,true_graph_error,true_object_error,true_total_error,wrong_graph_error,wrong_object_error,wrong_total_error,prediction_separation,error_ratio,error_margin,separation_ratio,transition_equivalent`; `skip_reason` is nullable only when status is `eligible`, and all metric/action fields are nullable only when status is `skipped`.
 - Candidate-ranking `details.json` is a list of exactly 151 eval-manifest objects with exactly `manifest_index,group,problem,step,action,category,label,scores,ranks`; `scores` and `ranks` each have exactly the five scorer names. Candidate-ranking `split_manifest.json` is byte-identical to §3.2. `role_probe_state.json` has exactly `schema_version,candidate_manifest_sha256,split_manifest_sha256,training,model`; `schema_version` is exactly `action_latent_updated_phase0.role_probe_state.v1`; `training` has exactly `seed,epochs,learning_rate,hidden_dim,optimizer,dtype,mask_policy,row_order`, with optimizer exactly `Adam(lr=0.001,betas=(0.9,0.999),eps=1e-08,weight_decay=0,amsgrad=False)`, dtype exactly `torch.float32`, mask policy exactly `all_real_sorted_object_ids_padding_only`, and row order exactly `canonical_manifest_then_ascending_active_role`; `model` has exactly `architecture,state_dict`; `architecture` has exactly `name:"RoleObjectProbe",latent_dim:64,action_dim:64,max_action_arity:4,hidden_dim:64,role_embedding,query`; `role_embedding` has exactly `num_embeddings:4,embedding_dim:64`; `query` is exactly the ordered list `[{kind:"linear",in_features:192,out_features:64,bias:true},{kind:"gelu",approximate:"none"},{kind:"linear",in_features:64,out_features:64,bias:true}]`; and every sorted `state_dict` record uses the canonical `name,shape,dtype,values` tensor schema with dtype exactly `torch.float32`.
 

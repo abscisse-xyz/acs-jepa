@@ -92,6 +92,45 @@ def canonical_json_bytes(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
 
 
+def tie_aware_auroc(positive: torch.Tensor, negative: torch.Tensor) -> float | None:
+    """Exact pairwise AUROC with one-half credit for equal scores."""
+
+    positive = positive.detach().to(device="cpu", dtype=torch.float64).flatten()
+    negative = negative.detach().to(device="cpu", dtype=torch.float64).flatten()
+    if positive.numel() == 0 or negative.numel() == 0:
+        return None
+    differences = positive[:, None] - negative[None, :]
+    return float(((differences > 0).to(torch.float64) + 0.5 * (differences == 0)).mean())
+
+
+def tie_aware_average_precision(logits: torch.Tensor, positive_labels: torch.Tensor) -> float:
+    """Integrate precision at complete descending equal-score group boundaries."""
+
+    logits = logits.detach().to(device="cpu", dtype=torch.float64).flatten()
+    positive_labels = positive_labels.detach().to(device="cpu", dtype=torch.bool).flatten()
+    order = torch.argsort(logits, descending=True, stable=True)
+    scores, labels = logits[order], positive_labels[order]
+    total_positive = int(labels.sum())
+    if total_positive == 0:
+        raise ValueError("average precision requires a positive label")
+    cumulative_tp = cumulative_fp = 0
+    previous_recall = average_precision = 0.0
+    start = 0
+    while start < scores.numel():
+        end = start + 1
+        while end < scores.numel() and scores[end] == scores[start]:
+            end += 1
+        group_tp = int(labels[start:end].sum())
+        cumulative_tp += group_tp
+        cumulative_fp += end - start - group_tp
+        recall = cumulative_tp / total_positive
+        precision = cumulative_tp / (cumulative_tp + cumulative_fp)
+        average_precision += (recall - previous_recall) * precision
+        previous_recall = recall
+        start = end
+    return average_precision
+
+
 def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
