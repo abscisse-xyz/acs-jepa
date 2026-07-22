@@ -250,6 +250,54 @@ def test_role_probe_overfits_problem_local_targets() -> None:
     assert result.eval_metrics["accuracy"] == 1.0
 
 
+def test_role_probe_is_reexported_from_pure_owner_and_legacy_wrapper_delegates_once(monkeypatch) -> None:
+    import torch
+
+    probes = _load_module()
+    import action_role_object_probe as owner
+
+    assert probes.RoleObjectProbe is owner.RoleObjectProbe
+    assert probes.fit_role_object_probe is owner.fit_role_object_probe
+    tensors = (
+        torch.zeros(2, 2),
+        torch.zeros(2, 2),
+        torch.tensor([[[1.0, 0.0], [0.0, 1.0]]] * 2),
+        torch.ones(2, 2, dtype=torch.bool),
+        torch.tensor([0, 1]),
+        torch.tensor([0, 1]),
+    )
+    calls = []
+    sentinel = owner.RoleObjectFitResult(
+        model=torch.nn.Identity(),
+        train_metrics={"count": 2, "accuracy": 0.5},
+        eval_metrics={"count": 2, "accuracy": 1.0},
+        train_tensors=tensors,
+        eval_tensors=tensors,
+        optimizer_steps=7,
+    )
+
+    def fake(*args, **kwargs):
+        calls.append((args, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(probes, "fit_role_object_probe", fake)
+    result = probes.train_role_probe(
+        tensors,
+        tensors,
+        max_action_arity=2,
+        hidden_dim=4,
+        epochs=7,
+        learning_rate=0.01,
+        seed=5,
+        device=torch.device("cpu"),
+    )
+    assert len(calls) == 1
+    assert result == probes.ProbeTrainingResult(
+        train_metrics=sentinel.train_metrics,
+        eval_metrics=sentinel.eval_metrics,
+    )
+
+
 def test_applicability_probe_overfits_separable_examples() -> None:
     import torch
 

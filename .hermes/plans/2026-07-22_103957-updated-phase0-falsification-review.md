@@ -192,3 +192,67 @@ The reviewer accepted numerical evidence, repeatability, formulas, hashes, resto
 - Authorization: exactly one verified SSH-signed Stage 0C commit containing the reviewed five-file worktree plus this mechanical PASS append; no Stage 0D, branch selection, additional implementation, or push.
 
 The reviewer independently accepted semantic manifest/corpus binding, all adversarial action/distance mutations, actual fixed-corpus source causality with successor isolation, the clean 44-failure implementation restart, recursive evidence recomputation, strict hashes/restoration/root ownership, exact repeat projections and sibling bytes, and all software/static checks. Baseline and Phase 2 each had 44 eligible, zero skipped, and equivalence rate 1.0. The reviewed five-file worktree identity was `e2d1ae4df45d39bd955f5f4b3ab039c6a4d3c2218ec3ac13b725458967ee7854` before this authorized mechanical append.
+
+## Stage 0D Implementation-Plan Review 1 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_a31b7188`
+- Authorization: Stage 0D implementation, evidence, assessment/decision, commit, and push not authorized.
+
+Current APIs and accepted artifacts were compatible, but the reviewer required exact one-based total-order rank serialization and metric denominators/reconciliation; pinned 1,549/518 role-row populations with full-batch RNG/thread/tensor/target/optimizer mutation contracts; deployable-score successor/source/candidate/metadata causality and transitive forbidden-dependency tests; independent assessor reconstruction of role-object and teacher-forced transition scores plus all ranks/metrics/verdicts; and pre-write refusal/no-partial-output contracts. Sections 7–8 were corrected before re-review.
+
+## Stage 0D Implementation-Plan Review 2 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_7f787da4`
+- Authorization: Stage 0D implementation, evidence, assessment/decision, commit, and push not authorized.
+
+Review 1's five blockers were otherwise resolved, but ranking's `binary` object still inherited undefined threshold-dependent recoverability metrics; the exact per-schema schema omitted trace MRR, category distributions, and no-class group counts required by the prose; and the ranking command was incorrectly required to compute branch predicates for inputs it does not receive. Ranking evidence is now explicitly threshold-free (`count,positive_count,negative_count,prevalence,auroc,average_precision`), the complete per-schema schema/null rules are pinned, and pre-write branch computation is scoped to the assessor.
+
+## Stage 0D Implementation-Plan Review 3 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_97a01202`
+- Authorization: Stage 0D implementation, evidence, assessment/decision, commit, and push not authorized.
+
+Review 2's blockers were closed. The residual blocker was ownership of `RoleObjectProbe`/`fit_role_object_probe`: their current Phase 2G module transitively imports simulator/replay helpers, while the Stage 0D file scope neither authorized extraction nor named a simulator-free owner. Section 7 now creates `script/action_role_object_probe.py` as the sole PyTorch-only owner, requires ranking/assessor to import it directly, and explicitly modifies the old supervised-probe module to re-export the class and preserve `train_role_probe` as an exact-signature/result compatibility wrapper with bit-exact regression coverage.
+
+## Stage 0D Implementation-Plan Review 4 — PASS
+
+- Date: 2026-07-22
+- Delegation: `deleg_86ae7e63`
+- Authorization: Stage 0D implementation only: create the simulator-free role-probe owner, refactor the legacy wrapper/re-exports, implement ranking and assessor code, and add/update the specified tests. Official evidence/assessment execution, decision record, branch selection, commit, push, Phase 1, and production planner/model changes remain unauthorized.
+
+The reviewer confirmed all Review 1–3 blockers closed: exact role-probe ownership and compatibility, 1,549/518 deterministic role-row execution, pure import boundary, five-scorer ranking schemas/formulas, independent five-vector assessor reconstruction, causal future-state isolation, and atomic output/refusal contracts are deterministic and compatible with current APIs.
+
+## Stage 0D Implementation-Readiness Review 1 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_b570075f`
+- Authorization: official evidence, assessment/decision, commit, push, and Phase 1 not authorized.
+
+The reviewer found incomplete recursive Stage 0B validation, incomplete exact role-optimizer execution coverage, assembled-score/rank causal coverage that stopped too early, and insufficiently auditable correction RED/GREEN history. These blockers were corrected under named behavioral RED/GREEN tests.
+
+## Stage 0D Implementation-Readiness Review 2 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_cefb0230`
+- Authorization: official evidence, assessment/decision, commit, push, and Phase 1 not authorized.
+
+The remaining blocker was a coordinated preprocessing mutation shared by all three probes of one feature set. The shared validator was corrected to independently extract all 604 feature rows and derive exact preprocessing from the fixed 453 training rows for all five feature sets.
+
+## Stage 0D Implementation-Readiness Review 3 — PASS
+
+- Date: 2026-07-22
+- Delegation: `deleg_37e12228`
+- Authorization: exactly four fixed ranking commands followed by the single fixed assessor command; no commit, push, or Phase 1 before implementation/evidence review PASS.
+
+The reviewer reproduced rejection of coordinated preprocessing mutations through both shared and assessor paths, accepted all four fixed Stage 0B repeat artifacts, and confirmed all prior implementation-readiness blockers closed.
+
+## Stage 0D Implementation/Evidence Review — PASS
+
+- Date: 2026-07-22
+- Delegation: `deleg_2b50718c`
+- Authorization: mechanically create `script/ACTION_LATENT_UPDATED_PHASE0_DECISION.md` as a byte-exact copy of accepted assessment `summary.md`, update review/audit records, rerun final verification, and create exactly one verified SSH-signed Stage 0D commit. Push and Phase 1 remain unauthorized.
+
+The reviewer independently revalidated all eight diagnostic repeat pairs, reconstructed all five ranking scorers and complete assessment, verified the 62-entry evidence manifest against actual bytes and hashes, and confirmed exact atomic inventories with no staging or rejected contamination. The deterministic assessor selected `BRANCH_D_ABSTRACT_ACTIONS`: clause 1 (`not raw_separable`) was false and clause 2 (`mostly_transition_equivalent`) was true. No planner, tuning, Phase 1, or production-model changes were present.

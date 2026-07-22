@@ -33,6 +33,11 @@ from action_diag_common import (
 )
 from action_negative_sampling import sample_action_negatives
 from action_phase0_common import tie_aware_auroc, tie_aware_average_precision
+from action_role_object_probe import (
+    RoleObjectProbe,  # noqa: F401 -- public compatibility re-export
+    _classification_metrics,
+    fit_role_object_probe,
+)
 from torch import Tensor
 
 SUMMARY_KEYS = frozenset(
@@ -132,44 +137,6 @@ class ProbeExample:
     argument_targets: Tensor
     step: int = 0
     argument_candidate_mask: Tensor | None = None
-
-
-class RoleObjectProbe(nn.Module):
-    """Retrieve a problem-local argument object from state object latents."""
-
-    def __init__(
-        self,
-        *,
-        latent_dim: int,
-        action_dim: int,
-        max_action_arity: int,
-        hidden_dim: int,
-    ) -> None:
-        super().__init__()
-        self.max_action_arity = int(max_action_arity)
-        self.role_embedding = nn.Embedding(max_action_arity, latent_dim)
-        self.query = nn.Sequential(
-            nn.Linear(latent_dim * 2 + action_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, latent_dim),
-        )
-
-    def forward(
-        self,
-        graph_latents: Tensor,
-        action_latents: Tensor,
-        object_latents: Tensor,
-        object_mask: Tensor,
-        role_ids: Tensor,
-    ) -> Tensor:
-        if object_mask.dtype != torch.bool:
-            raise ValueError("object_mask must be bool")
-        if role_ids.numel() and (int(role_ids.min()) < 0 or int(role_ids.max()) >= self.max_action_arity):
-            raise ValueError("role_ids exceed max_action_arity")
-        role_features = self.role_embedding(role_ids)
-        query = self.query(torch.cat([graph_latents, action_latents, role_features], dim=-1))
-        logits = torch.einsum("bd,bnd->bn", query, object_latents)
-        return logits.masked_fill(~object_mask, float("-inf"))
 
 
 def deterministic_group_split(
@@ -296,14 +263,6 @@ def train_schema_probe(
     )
 
 
-def _classification_metrics(logits: Tensor, labels: Tensor) -> dict[str, object]:
-    predictions = logits.argmax(dim=-1)
-    return {
-        "count": int(labels.numel()),
-        "accuracy": None if labels.numel() == 0 else float((predictions == labels).float().mean().item()),
-    }
-
-
 def train_role_probe(
     train_data: tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
     eval_data: tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
@@ -317,36 +276,20 @@ def train_role_probe(
 ) -> ProbeTrainingResult:
     """Fit a role-aware object retrieval probe over problem-local object banks."""
 
-    torch.manual_seed(seed)
-    train = tuple(tensor.detach().to(device) for tensor in train_data)
-    evaluation = tuple(tensor.detach().to(device) for tensor in eval_data)
-    model = RoleObjectProbe(
-        latent_dim=train[0].size(-1),
-        action_dim=train[1].size(-1),
+    result = fit_role_object_probe(
+        train_data,
+        eval_data,
         max_action_arity=max_action_arity,
         hidden_dim=hidden_dim,
-    ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    for _ in range(epochs):
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(*train[:5])
-        loss = F.cross_entropy(logits, train[5].long())
-        loss.backward()
-        optimizer.step()
-    return ProbeTrainingResult(
-        train_metrics=_role_metrics(model(*train[:5]), train[5].long(), train[4].long()),
-        eval_metrics=_role_metrics(model(*evaluation[:5]), evaluation[5].long(), evaluation[4].long()),
+        epochs=epochs,
+        learning_rate=learning_rate,
+        seed=seed,
+        device=device,
     )
-
-
-def _role_metrics(logits: Tensor, targets: Tensor, role_ids: Tensor) -> dict[str, object]:
-    metrics = _classification_metrics(logits, targets)
-    predictions = logits.argmax(dim=-1)
-    metrics["per_role_accuracy"] = {
-        str(role): float((predictions[role_ids == role] == targets[role_ids == role]).float().mean().item())
-        for role in sorted(set(role_ids.tolist()))
-    }
-    return metrics
+    return ProbeTrainingResult(
+        train_metrics=result.train_metrics,
+        eval_metrics=result.eval_metrics,
+    )
 
 
 def train_applicability_probe(
