@@ -152,3 +152,43 @@ The exact graph-edge blocker was accepted, including all seven adversarial mutat
 - Authorization: one verified SSH-signed Stage 0B commit; Stage 0C, Stage 0D, branch selection, and later work remain unauthorized.
 
 The reviewer verified exact full-train forward tensors and original/control BCE targets for all `15 × epochs` calls, including same-shape duplicate-row mutation sensitivity. All prior graph, causality, simulator-free, schema, fitting, metric, reconstruction, and repeatability contracts remained accepted. All 9,060 logits per checkpoint reconstructed with maximum absolute error `0.0`; focused Stage 0B, core, scoped CLI, Ruff, `compileall`, and whitespace checks passed. The reviewed tracked diff SHA-256 was `5445cfad4aea8ad87233396a30e6369f6ed602f3aa7f2043e8b9fa2a849d6038` before this mechanical verdict-record append.
+
+## Stage 0C Implementation-Plan Review 1 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_b616095d`
+- Authorization: Stage 0C implementation not authorized.
+
+The reviewer found current APIs adequate but required exact contracts for raw action-latent hard-negative distance/zero/ties; strict `states[local_step+1]` successor recovery and JEPA call sequence; CPU-float64 graph/object component formulas, weights, alignment, near-zero and aggregation semantics; decision-critical settings and detail null/order schemas; production-boundary future/source/object/threshold mutations; checkpoint/output/root/CLI binding; and literal Stage 0D handoff paths/helper equivalence. Sections 6–8 were amended before re-review.
+
+## Stage 0C Implementation-Plan Review 2 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_d819ef44`
+- Authorization: Stage 0C implementation not authorized.
+
+Review 1's substantive contracts were accepted, but two current-API contradictions remained: distance-only CPU-float64 action latents could not be passed to the native CUDA/float32 predictor, and CUDA object metadata could not equal CPU canonical tensors directly. Section 6 now preserves separate native predictor latents and detached distance copies, and compares detached CPU-long metadata validation copies while retaining native state metadata on the extraction device.
+
+## Stage 0C Implementation-Plan Review 3 — PASS
+
+- Date: 2026-07-22
+- Delegation: `deleg_7fa43795`
+- Authorization: Stage 0C implementation only; evidence generation, Stage 0D, branch selection, and later work remain unauthorized.
+
+The reviewer confirmed both device/dtype corrections, all Review 1 contracts, fixed hashes and 1.0 prediction weights, all 44 successor/eligible-hard-negative mappings, deterministic schemas/bindings/repeatability, and operational compatibility with current APIs. The reviewed plan diff SHA-256 was `44dc90dda9611a0fafdc07fae4f3e2c905fa6e924914c511afd3e8ec5107a094` before this mechanical verdict append.
+
+## Stage 0C Implementation/Evidence Review 1 — FAIL
+
+- Date: 2026-07-22
+- Delegation: `deleg_26a6bf05`
+- Authorization: Stage 0C commit, Stage 0D, branch selection, and later work not authorized.
+
+The reviewer accepted numerical evidence, repeatability, formulas, hashes, restoration, and simulator-free execution, but found that saved details were not semantically bound to fixed manifest actions/distances, the source-causality mock ignored source state, and the original implementation lacked complete vertical RED-before-production evidence. Review 1 evidence was archived, semantic and actual-causality regressions were added, and the rejected implementation was discarded and cleanly reimplemented after a complete behavior-stub RED.
+
+## Stage 0C Implementation/Evidence Review 2 — PASS
+
+- Date: 2026-07-22
+- Delegation: `deleg_22f8d83a`
+- Authorization: exactly one verified SSH-signed Stage 0C commit containing the reviewed five-file worktree plus this mechanical PASS append; no Stage 0D, branch selection, additional implementation, or push.
+
+The reviewer independently accepted semantic manifest/corpus binding, all adversarial action/distance mutations, actual fixed-corpus source causality with successor isolation, the clean 44-failure implementation restart, recursive evidence recomputation, strict hashes/restoration/root ownership, exact repeat projections and sibling bytes, and all software/static checks. Baseline and Phase 2 each had 44 eligible, zero skipped, and equivalence rate 1.0. The reviewed five-file worktree identity was `e2d1ae4df45d39bd955f5f4b3ab039c6a4d3c2218ec3ac13b725458967ee7854` before this authorized mechanical append.
