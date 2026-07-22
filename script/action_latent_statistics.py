@@ -221,12 +221,147 @@ def schema_argument_variance_decomposition(latents: torch.Tensor, schema_ids: Se
     }
 
 
+def schema_residuals(
+    latents: torch.Tensor,
+    schema_ids: Sequence[str],
+    group_ids: Sequence[Any],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return global-schema and source-state/schema residuals in float64."""
+
+    values = _as_2d_float64(latents)
+    _check_metadata(values, schema_ids)
+    if len(group_ids) != values.size(0):
+        raise ValueError("group_ids length must match number of latents")
+    global_residual = torch.empty_like(values)
+    state_residual = torch.empty_like(values)
+    schema_groups = _schema_indices(schema_ids)
+    state_groups = _margin_group_indices(schema_ids, group_ids)
+    for indices in schema_groups.values():
+        global_residual[indices] = values[indices] - values[indices].mean(dim=0)
+    for bucket, indices in state_groups.items():
+        if len(indices) < 2:
+            raise ValueError(f"state/schema bucket {bucket!r} is a singleton")
+        state_residual[indices] = values[indices] - values[indices].mean(dim=0)
+    return global_residual, state_residual
+
+
+def raw_variance_decomposition(latents: torch.Tensor, schema_ids: Sequence[str]) -> dict[str, float]:
+    """Compute the exact float64 population schema variance decomposition."""
+
+    values = _as_2d_float64(latents)
+    _check_metadata(values, schema_ids)
+    if values.size(0) == 0:
+        raise ValueError("raw variance decomposition requires a nonempty population")
+    grand_mean = values.mean(dim=0)
+    total = (values - grand_mean).square().sum(dim=1).mean()
+    if float(total) <= torch.finfo(torch.float64).eps:
+        raise ValueError("total variance is at or below float64 epsilon")
+    between = values.new_zeros(())
+    within = values.new_zeros(())
+    count = values.size(0)
+    for indices in _schema_indices(schema_ids).values():
+        group = values[indices]
+        mean = group.mean(dim=0)
+        between += (len(indices) / count) * (mean - grand_mean).square().sum()
+        within += (group - mean).square().sum(dim=1).sum() / count
+    error = (total - between - within).abs()
+    tolerance = 1e-10 * max(1.0, float(total))
+    if float(error) > tolerance:
+        raise ValueError("raw variance decomposition does not reconstruct total variance")
+    return {
+        "total_variance": float(total),
+        "between_schema_variance": float(between),
+        "within_schema_variance": float(within),
+        "between_schema_fraction": float(between / total),
+        "within_schema_fraction": float(within / total),
+        "reconstruction_absolute_error": float(error),
+    }
+
+
+def residual_statistics(residuals: torch.Tensor) -> dict[str, Any]:
+    """Report exact uncentered float64 population residual statistics."""
+
+    values = _as_2d_float64(residuals)
+    count, dimension = values.shape
+    if count == 0 or dimension == 0:
+        raise ValueError("residual statistics require a nonempty matrix")
+    std = values.std(dim=0, correction=0)
+    covariance = values.T @ values / count
+    eigenvalues = torch.linalg.eigvalsh(covariance).sort(descending=True).values
+    if bool((eigenvalues < -1e-12).any()):
+        raise ValueError("residual covariance has eigenvalue below -1e-12")
+    eigenvalues = torch.where(eigenvalues < 0, torch.zeros_like(eigenvalues), eigenvalues)
+    eigenvalue_sum = eigenvalues.sum()
+    if float(eigenvalue_sum) == 0.0:
+        raise ValueError("residual covariance has zero eigenvalue sum")
+    spectrum = eigenvalues / eigenvalue_sum
+    positive = spectrum[spectrum > 0]
+    effective_rank = torch.exp(-(positive * positive.log()).sum())
+    max_eigenvalue = eigenvalues.max()
+    numerical_rank = int((eigenvalues > 1e-6 * max_eigenvalue).sum())
+    return {
+        "count": int(count),
+        "dimension": int(dimension),
+        "std_min": float(std.min()),
+        "std_mean": float(std.mean()),
+        "std_max": float(std.max()),
+        "std_values": [float(value) for value in std],
+        "covariance_eigenvalues": [float(value) for value in eigenvalues],
+        "normalized_eigenvalue_spectrum": [float(value) for value in spectrum],
+        "effective_rank": float(effective_rank),
+        "numerical_rank": numerical_rank,
+        "zero_norm_count": int((torch.linalg.vector_norm(values, dim=1) == 0).sum()),
+    }
+
+
+def unit_normalize_zero(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Unit-normalize rows, mapping exact zero norms to exact zero vectors."""
+
+    matrix = _as_2d_float64(values)
+    norms = torch.linalg.vector_norm(matrix, dim=1, keepdim=True)
+    zero = norms.squeeze(1) == 0
+    normalized = torch.where(zero.unsqueeze(1), torch.zeros_like(matrix), matrix / norms.clamp_min(1.0e-300))
+    return normalized, zero
+
+
+def nearest_candidate(
+    values: torch.Tensor,
+    reference_index: int,
+    candidate_indices: Sequence[int],
+    action_keys: Sequence[tuple[str, tuple[str, ...]]],
+) -> tuple[int, float]:
+    """Select nearest explicit candidate, breaking exact distance ties by action key."""
+
+    matrix = _as_2d_float64(values)
+    if len(action_keys) != matrix.size(0):
+        raise ValueError("action_keys length must match number of rows")
+    if not candidate_indices:
+        raise ValueError("at least one nearest-neighbor candidate is required")
+    ranked = []
+    for index in candidate_indices:
+        distance = float(torch.linalg.vector_norm(matrix[index] - matrix[reference_index]))
+        ranked.append((distance, action_keys[index], index))
+    distance, _, index = min(ranked)
+    return index, distance
+
+
 def _as_2d_float(latents: torch.Tensor) -> torch.Tensor:
     values = latents.detach().to(dtype=torch.float32, device="cpu")
     if values.ndim == 1:
         values = values.unsqueeze(0)
     if values.ndim != 2:
         raise ValueError(f"expected a 2D latent tensor, got shape {tuple(values.shape)}")
+    return values
+
+
+def _as_2d_float64(latents: torch.Tensor) -> torch.Tensor:
+    values = latents.detach().to(dtype=torch.float64, device="cpu")
+    if values.ndim == 1:
+        values = values.unsqueeze(0)
+    if values.ndim != 2:
+        raise ValueError(f"expected a 2D latent tensor, got shape {tuple(values.shape)}")
+    if not bool(torch.isfinite(values).all()):
+        raise ValueError("latent matrix contains non-finite values")
     return values
 
 
