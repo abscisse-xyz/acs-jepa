@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import inspect
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 
 import pytest
 import torch
 import torch.nn as nn
 from acs_jepa.architectures import (
-    ActionEncoder,
-    GRULatentPredictorG,
-    GraphStateProjector,
-    ActionDecodingSpace,
     ActionDecoder,
+    ActionDecodingSpace,
+    ActionEncoder,
     ActionSamplingFamily,
+    GraphStateProjector,
+    GRULatentPredictorG,
     JEPALatentState,
     LatentActionEncoder,
     ResidualMLPLatentPredictorG,
@@ -21,14 +23,14 @@ from acs_jepa.architectures import (
 )
 from acs_jepa.goals import PredicateEvaluator, build_predicate_evaluator
 from acs_jepa.graph import (
-    GroundAction,
     GraphEncoder,
+    GroundAction,
     build_state_graph,
     parse_domain_problem,
     tensorize_action,
     tensorize_predicate,
 )
-from acs_jepa.jepa import GraphJEPA
+from acs_jepa.jepa import GraphJEPA, GraphJEPACandidateRolloutOutput
 from acs_jepa.losses import GraphJEPALossModule, GraphLatentPredictionLoss, GraphVCLoss
 from acs_jepa.planner import LatentMPPIConfig, LatentMPPIPlanner
 from torch_geometric.loader import DataLoader
@@ -360,7 +362,9 @@ def test_latent_predictor_temporal_path_matches_single_step(tmp_path: Path, pred
     )
     predictor = predictor_cls(latent_dim=6, action_dim=6, hidden_dim=10)
     latent_state = state_encoder(graph_output)
-    action_a = action_encoder(tensorize_action(parsed, GroundAction("move", ("car0", "j0", "j1", "road0"))), latent_state)
+    action_a = action_encoder(
+        tensorize_action(parsed, GroundAction("move", ("car0", "j0", "j1", "road0"))), latent_state
+    )
     action_b = action_encoder(tensorize_action(parsed, GroundAction("build", ("road0", "j0", "j1"))), latent_state)
     temporal_state = _temporal_latent_state(latent_state, latent_state)
     temporal_actions = torch.stack([action_a, action_b], dim=1)
@@ -688,6 +692,642 @@ def test_graph_jepa_recursive_predictions_call_predictor_once_per_order(tmp_path
     assert output.predicted_states_by_order[2].graph_latent.shape == (1, 1, 6)
 
 
+def test_candidate_rollout_uses_each_predicted_source_and_preserves_order(tmp_path: Path) -> None:
+    parsed, _, _ = _encoded_graph(tmp_path)
+    action_encoder = _RecordingCandidateActionEncoder()
+    predictor = _RecordingCandidatePredictor()
+    model = _build_graph_jepa(parsed, action_encoder=action_encoder, predictor=predictor)
+    object_ids = torch.tensor([0, 1, 0, 1])
+    object_batch = torch.tensor([0, 0, 1, 1])
+    initial_state = JEPALatentState(
+        graph_latent=torch.zeros(2, 2),
+        object_latents=torch.zeros(4, 2),
+        object_ids=object_ids,
+        object_batch=object_batch,
+    )
+    action_tensors = {
+        "action_id": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+        "arguments": torch.arange(24).reshape(2, 3, 4),
+    }
+
+    output = model.rollout_grounded_candidates(initial_state, action_tensors)
+
+    assert tuple(inspect.signature(GraphJEPA.rollout_grounded_candidates).parameters) == (
+        "self",
+        "initial_state",
+        "action_tensors",
+    )
+    assert tuple(field.name for field in fields(GraphJEPACandidateRolloutOutput)) == (
+        "initial_state",
+        "final_state",
+        "predicted_states",
+        "control_latents",
+    )
+    with pytest.raises(FrozenInstanceError):
+        setattr(output, "initial_state", initial_state)
+    assert output.initial_state is initial_state
+    assert output.final_state is output.predicted_states[-1]
+    assert len(output.predicted_states) == 3
+    assert action_encoder.states == [initial_state, *output.predicted_states[:-1]]
+    assert predictor.states == [initial_state, *output.predicted_states[:-1]]
+    for step, candidate in enumerate(action_encoder.actions):
+        for name, tensor in action_tensors.items():
+            assert torch.equal(candidate[name], tensor[:, step])
+    expected_controls = torch.tensor(
+        [[[1.0, 0.0], [2.0, 1.0], [3.0, 3.0]], [[4.0, 0.0], [5.0, 4.0], [6.0, 9.0]]]
+    )
+    assert torch.equal(output.control_latents, expected_controls)
+    assert [state.graph_latent[:, 0].tolist() for state in output.predicted_states] == [
+        [1.0, 4.0],
+        [3.0, 9.0],
+        [6.0, 15.0],
+    ]
+
+
+def test_candidate_rollout_supports_real_action_encoder_predictor_and_gradients(tmp_path: Path) -> None:
+    parsed, _, graph = _encoded_graph(tmp_path)
+    graph_batch = next(iter(DataLoader([graph, graph], batch_size=2)))
+    action_encoder = ActionEncoder(
+        LatentActionEncoder(
+            num_actions=len(parsed.actions),
+            max_action_arity=parsed.max_action_arity,
+            latent_dim=6,
+            action_dim=6,
+            hidden_dim=10,
+        ),
+        action_dim=6,
+        context_steps=1,
+    )
+    predictor = ResidualMLPLatentPredictorG(latent_dim=6, action_dim=6, hidden_dim=10)
+    model = _build_graph_jepa(parsed, action_encoder=action_encoder, predictor=predictor)
+    initial_state = model.encode(graph_batch)
+    candidates = [
+        tensorize_action(parsed, GroundAction("move", ("car0", "j0", "j1", "road0"))),
+        tensorize_action(parsed, GroundAction("build", ("road0", "j0", "j1"))),
+        tensorize_action(parsed, GroundAction("move", ("car0", "j1", "j0", "road0"))),
+    ]
+    sequence = _stack_tensor_dict(candidates)
+    action_tensors = {name: tensor.unsqueeze(0).expand(2, *tensor.shape) for name, tensor in sequence.items()}
+
+    output = model.rollout_grounded_candidates(initial_state, action_tensors)
+    (output.control_latents.sum() + output.final_state.graph_latent.sum()).backward()
+
+    assert output.control_latents.shape == (2, 3, 6)
+    assert output.final_state.graph_latent.shape == (2, 6)
+    assert output.final_state.object_latents.shape == (8, 6)
+    assert any(
+        parameter.grad is not None and parameter.grad.abs().sum() > 0 for parameter in action_encoder.parameters()
+    )
+    assert any(parameter.grad is not None and parameter.grad.abs().sum() > 0 for parameter in predictor.parameters())
+
+
+def test_candidate_rollout_rejects_empty_action_mapping(tmp_path: Path) -> None:
+    model, initial_state, _ = _candidate_rollout_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="^action_tensors must not be empty$"):
+        model.rollout_grounded_candidates(initial_state, {})
+
+
+def test_candidate_rollout_rejects_non_tensor_action_value(tmp_path: Path) -> None:
+    model, initial_state, _ = _candidate_rollout_fixture(tmp_path)
+
+    with pytest.raises(TypeError, match="^action tensor 'action_id' must be a Tensor$"):
+        model.rollout_grounded_candidates(initial_state, {"action_id": [[1, 2], [3, 4]]})
+
+
+def test_candidate_rollout_rejects_action_tensor_below_rank_two(tmp_path: Path) -> None:
+    model, initial_state, _ = _candidate_rollout_fixture(tmp_path)
+
+    message = "action tensor 'action_id' must have at least two dimensions"
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        model.rollout_grounded_candidates(initial_state, {"action_id": torch.tensor([1, 2])})
+
+
+def test_candidate_rollout_rejects_inconsistent_action_batch_horizon(tmp_path: Path) -> None:
+    model, initial_state, _ = _candidate_rollout_fixture(tmp_path)
+    action_tensors = {
+        "action_id": torch.ones(2, 3),
+        "arguments": torch.ones(2, 2, 4),
+    }
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(initial_state, action_tensors)
+    assert str(error.value) == "all action tensors must share leading [B, H] dimensions"
+
+
+def test_candidate_rollout_rejects_initial_graph_rank(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    state = JEPALatentState(
+        graph_latent=state.graph_latent.unsqueeze(1),
+        object_latents=state.object_latents,
+        object_ids=state.object_ids,
+        object_batch=state.object_batch,
+    )
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "initial_state.graph_latent must have shape [B, D_z]"
+
+
+def test_candidate_rollout_rejects_empty_initial_graph(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    state = JEPALatentState(
+        graph_latent=torch.empty(0, 2),
+        object_latents=state.object_latents,
+        object_ids=state.object_ids,
+        object_batch=state.object_batch,
+    )
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "initial_state.graph_latent dimensions must be nonempty"
+
+
+def test_candidate_rollout_rejects_initial_object_rank(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    state = JEPALatentState(
+        graph_latent=state.graph_latent,
+        object_latents=state.object_latents.unsqueeze(1),
+        object_ids=state.object_ids,
+        object_batch=state.object_batch,
+    )
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "initial_state.object_latents must have shape [N_obj, D_z]"
+
+
+def test_candidate_rollout_rejects_initial_object_width(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    state = JEPALatentState(
+        graph_latent=state.graph_latent,
+        object_latents=torch.zeros(4, 3),
+        object_ids=state.object_ids,
+        object_batch=state.object_batch,
+    )
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "initial state graph and object latent widths must match"
+
+
+def test_candidate_rollout_rejects_initial_object_row_mismatch(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    state = JEPALatentState(
+        graph_latent=state.graph_latent,
+        object_latents=state.object_latents[:3],
+        object_ids=state.object_ids,
+        object_batch=state.object_batch,
+    )
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "initial state object rows and metadata lengths must match"
+
+
+def test_candidate_rollout_rejects_initial_object_ids_rank(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    state = JEPALatentState(
+        graph_latent=state.graph_latent,
+        object_latents=state.object_latents,
+        object_ids=state.object_ids.unsqueeze(1),
+        object_batch=state.object_batch,
+    )
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "initial_state.object_ids must be rank one"
+
+
+def test_candidate_rollout_rejects_initial_object_batch_rank(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    state = JEPALatentState(
+        graph_latent=state.graph_latent,
+        object_latents=state.object_latents,
+        object_ids=state.object_ids,
+        object_batch=state.object_batch.unsqueeze(1),
+    )
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "initial_state.object_batch must be rank one"
+
+
+def test_candidate_rollout_rejects_initial_metadata_length_mismatch(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    state = JEPALatentState(
+        graph_latent=state.graph_latent,
+        object_latents=state.object_latents,
+        object_ids=state.object_ids[:-1],
+        object_batch=state.object_batch,
+    )
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "initial state object rows and metadata lengths must match"
+
+
+def test_candidate_rollout_rejects_initial_object_batch_out_of_range(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    state = JEPALatentState(
+        graph_latent=state.graph_latent,
+        object_latents=state.object_latents,
+        object_ids=state.object_ids,
+        object_batch=torch.tensor([0, 0, 1, 2]),
+    )
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "initial_state.object_batch values must be in [0, B)"
+
+
+def test_candidate_rollout_rejects_candidate_batch_mismatch(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    action_tensors = {name: tensor[:1] for name, tensor in action_tensors.items()}
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "candidate batch must match initial state graph batch"
+
+
+def test_candidate_rollout_rejects_zero_candidate_horizon(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    action_tensors = {name: tensor[:, :0] for name, tensor in action_tensors.items()}
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "candidate horizon must be positive"
+
+
+def test_candidate_rollout_rejects_exposed_none_action_context(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.action_encoder.context_steps = None
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "action_encoder.context_steps must be exactly 1"
+
+
+def test_candidate_rollout_rejects_exposed_multi_step_action_context(tmp_path: Path) -> None:
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.action_encoder.context_steps = 2
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "action_encoder.context_steps must be exactly 1"
+
+
+def test_candidate_rollout_rejects_non_tensor_control(tmp_path: Path) -> None:
+    class ListControlEncoder(nn.Module):
+        def forward(self, action_tensors, latent_state):
+            return [[0.0, 0.0], [0.0, 0.0]]
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.action_encoder = ListControlEncoder()
+
+    with pytest.raises(TypeError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "action encoder control must be a Tensor with shape [B, D_a]"
+
+
+def test_candidate_rollout_rejects_control_rank(tmp_path: Path) -> None:
+    class RankThreeControlEncoder(nn.Module):
+        def forward(self, action_tensors, latent_state):
+            return torch.zeros(latent_state.graph_latent.size(0), 1, 2)
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.action_encoder = RankThreeControlEncoder()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "action encoder control must have shape [B, D_a]"
+
+
+def test_candidate_rollout_rejects_control_batch_mismatch(tmp_path: Path) -> None:
+    class WrongBatchControlEncoder(nn.Module):
+        def forward(self, action_tensors, latent_state):
+            return torch.zeros(1, 2)
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.action_encoder = WrongBatchControlEncoder()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "action encoder control batch must match candidate batch"
+
+
+def test_candidate_rollout_rejects_later_control_width_change(tmp_path: Path) -> None:
+    class ChangingWidthControlEncoder(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+
+        def forward(self, action_tensors, latent_state):
+            self.call_count += 1
+            width = 2 if self.call_count == 1 else 3
+            return torch.zeros(latent_state.graph_latent.size(0), width)
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.action_encoder = ChangingWidthControlEncoder()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "action encoder control width must remain constant"
+
+
+def test_candidate_rollout_rejects_non_latent_predictor_output(tmp_path: Path) -> None:
+    class TensorPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return latent_state.graph_latent
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = TensorPredictor()
+
+    with pytest.raises(TypeError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor must return JEPALatentState"
+
+
+def test_candidate_rollout_rejects_predicted_graph_rank_change(tmp_path: Path) -> None:
+    class GraphRankPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent.unsqueeze(1),
+                object_latents=latent_state.object_latents,
+                object_ids=latent_state.object_ids,
+                object_batch=latent_state.object_batch,
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = GraphRankPredictor()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor graph_latent must preserve rank two"
+
+
+def test_candidate_rollout_rejects_predicted_graph_batch_change(tmp_path: Path) -> None:
+    class GraphBatchPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent[:1],
+                object_latents=latent_state.object_latents,
+                object_ids=latent_state.object_ids,
+                object_batch=latent_state.object_batch,
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = GraphBatchPredictor()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor graph_latent must preserve initial batch size"
+
+
+def test_candidate_rollout_rejects_predicted_graph_width_change(tmp_path: Path) -> None:
+    class GraphWidthPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return JEPALatentState(
+                graph_latent=torch.cat((latent_state.graph_latent, torch.zeros(2, 1)), dim=1),
+                object_latents=latent_state.object_latents,
+                object_ids=latent_state.object_ids,
+                object_batch=latent_state.object_batch,
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = GraphWidthPredictor()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor graph_latent must preserve initial latent width"
+
+
+def test_candidate_rollout_rejects_final_in_place_initial_graph_resize(tmp_path: Path) -> None:
+    class FinalGraphResizePredictor(nn.Module):
+        def __init__(self, original_state: JEPALatentState) -> None:
+            super().__init__()
+            self.original_state = original_state
+            self.call_count = 0
+
+        def forward(self, latent_state, action_latent):
+            self.call_count += 1
+            if self.call_count == 3:
+                self.original_state.graph_latent.resize_(2, 3)
+            return self.original_state
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    predictor = FinalGraphResizePredictor(state)
+    model.predictor = predictor
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor graph_latent must preserve initial latent width"
+    assert predictor.call_count == 3
+
+
+def test_candidate_rollout_rejects_predicted_object_rank_change(tmp_path: Path) -> None:
+    class ObjectRankPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent,
+                object_latents=latent_state.object_latents.unsqueeze(1),
+                object_ids=latent_state.object_ids,
+                object_batch=latent_state.object_batch,
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = ObjectRankPredictor()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor object_latents must preserve rank two"
+
+
+def test_candidate_rollout_rejects_predicted_object_row_change(tmp_path: Path) -> None:
+    class ObjectRowPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent,
+                object_latents=latent_state.object_latents[:-1],
+                object_ids=latent_state.object_ids,
+                object_batch=latent_state.object_batch,
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = ObjectRowPredictor()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor object_latents must preserve initial row count"
+
+
+def test_candidate_rollout_rejects_predicted_object_width_change(tmp_path: Path) -> None:
+    class ObjectWidthPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent,
+                object_latents=torch.cat((latent_state.object_latents, torch.zeros(4, 1)), dim=1),
+                object_ids=latent_state.object_ids,
+                object_batch=latent_state.object_batch,
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = ObjectWidthPredictor()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor object_latents must preserve initial latent width"
+
+
+def test_candidate_rollout_rejects_final_in_place_initial_object_resize(tmp_path: Path) -> None:
+    class FinalObjectResizePredictor(nn.Module):
+        def __init__(self, original_state: JEPALatentState) -> None:
+            super().__init__()
+            self.original_state = original_state
+            self.call_count = 0
+
+        def forward(self, latent_state, action_latent):
+            self.call_count += 1
+            if self.call_count == 3:
+                self.original_state.object_latents.resize_(4, 3)
+            return self.original_state
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    predictor = FinalObjectResizePredictor(state)
+    model.predictor = predictor
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor object_latents must preserve initial latent width"
+    assert predictor.call_count == 3
+
+
+def test_candidate_rollout_rejects_replaced_object_ids_values(tmp_path: Path) -> None:
+    class ReorderedObjectIdsPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent,
+                object_latents=latent_state.object_latents,
+                object_ids=latent_state.object_ids.flip(0),
+                object_batch=latent_state.object_batch,
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = ReorderedObjectIdsPredictor()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor object_ids must preserve initial values"
+
+
+def test_candidate_rollout_rejects_cloned_object_ids(tmp_path: Path) -> None:
+    class ClonedObjectIdsPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent,
+                object_latents=latent_state.object_latents,
+                object_ids=latent_state.object_ids.clone(),
+                object_batch=latent_state.object_batch,
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = ClonedObjectIdsPredictor()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor object_ids must preserve exact tensor identity"
+
+
+def test_candidate_rollout_rejects_replaced_object_batch_values(tmp_path: Path) -> None:
+    class ReorderedObjectBatchPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent,
+                object_latents=latent_state.object_latents,
+                object_ids=latent_state.object_ids,
+                object_batch=latent_state.object_batch.flip(0),
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = ReorderedObjectBatchPredictor()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor object_batch must preserve initial values"
+
+
+def test_candidate_rollout_rejects_cloned_object_batch(tmp_path: Path) -> None:
+    class ClonedObjectBatchPredictor(nn.Module):
+        def forward(self, latent_state, action_latent):
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent,
+                object_latents=latent_state.object_latents,
+                object_ids=latent_state.object_ids,
+                object_batch=latent_state.object_batch.clone(),
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    model.predictor = ClonedObjectBatchPredictor()
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor object_batch must preserve exact tensor identity"
+
+
+def test_candidate_rollout_rejects_late_in_place_object_ids_mutation(tmp_path: Path) -> None:
+    class LateObjectIdsMutationPredictor(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+
+        def forward(self, latent_state, action_latent):
+            self.call_count += 1
+            if self.call_count == 3:
+                latent_state.object_ids.copy_(latent_state.object_ids.flip(0))
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent,
+                object_latents=latent_state.object_latents,
+                object_ids=latent_state.object_ids,
+                object_batch=latent_state.object_batch,
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    predictor = LateObjectIdsMutationPredictor()
+    model.predictor = predictor
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor object_ids must preserve initial values"
+    assert predictor.call_count == 3
+
+
+def test_candidate_rollout_rejects_late_in_place_object_batch_mutation(tmp_path: Path) -> None:
+    class LateObjectBatchMutationPredictor(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+
+        def forward(self, latent_state, action_latent):
+            self.call_count += 1
+            if self.call_count == 3:
+                latent_state.object_batch.copy_(latent_state.object_batch.flip(0))
+            return JEPALatentState(
+                graph_latent=latent_state.graph_latent,
+                object_latents=latent_state.object_latents,
+                object_ids=latent_state.object_ids,
+                object_batch=latent_state.object_batch,
+            )
+
+    model, state, action_tensors = _candidate_rollout_fixture(tmp_path)
+    predictor = LateObjectBatchMutationPredictor()
+    model.predictor = predictor
+
+    with pytest.raises(ValueError) as error:
+        model.rollout_grounded_candidates(state, action_tensors)
+    assert str(error.value) == "predictor object_batch must preserve initial values"
+    assert predictor.call_count == 3
+
+
 def test_planner_rollout_accepts_action_latents(tmp_path: Path) -> None:
     parsed, _, graph = _encoded_graph(tmp_path)
     model = _build_graph_jepa(parsed)
@@ -748,6 +1388,54 @@ def test_planner_rollout_rejects_invalid_action_latent_shape(tmp_path: Path) -> 
         planner.rollout_from_state(initial_state, torch.randn(1, 6))
 
 
+class _RecordingCandidateActionEncoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.actions: list[dict[str, torch.Tensor]] = []
+        self.states: list[JEPALatentState] = []
+
+    def forward(self, action_tensors: dict[str, torch.Tensor], latent_state: JEPALatentState) -> torch.Tensor:
+        self.actions.append(action_tensors)
+        self.states.append(latent_state)
+        return torch.stack((action_tensors["action_id"].float(), latent_state.graph_latent[:, 0]), dim=-1)
+
+
+class _RecordingCandidatePredictor(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.states: list[JEPALatentState] = []
+
+    def forward(self, latent_state: JEPALatentState, action_latent: torch.Tensor) -> JEPALatentState:
+        self.states.append(latent_state)
+        graph_delta = action_latent[:, :1].expand_as(latent_state.graph_latent)
+        object_delta = action_latent[latent_state.object_batch, :1].expand_as(latent_state.object_latents)
+        return JEPALatentState(
+            graph_latent=latent_state.graph_latent + graph_delta,
+            object_latents=latent_state.object_latents + object_delta,
+            object_ids=latent_state.object_ids,
+            object_batch=latent_state.object_batch,
+        )
+
+
+def _candidate_rollout_fixture(
+    tmp_path: Path,
+) -> tuple[GraphJEPA, JEPALatentState, dict[str, torch.Tensor]]:
+    parsed, _, _ = _encoded_graph(tmp_path)
+    model = _build_graph_jepa(
+        parsed,
+        action_encoder=_RecordingCandidateActionEncoder(),
+        predictor=_RecordingCandidatePredictor(),
+    )
+    initial_state = JEPALatentState(
+        graph_latent=torch.zeros(2, 2),
+        object_latents=torch.zeros(4, 2),
+        object_ids=torch.tensor([0, 1, 0, 1]),
+        object_batch=torch.tensor([0, 0, 1, 1]),
+    )
+    action_tensors = {"action_id": torch.tensor([[1, 2, 3], [4, 5, 6]])}
+    return model, initial_state, action_tensors
+
+
 class _ExplodingActionEncoder(nn.Module):
     def forward(self, *args, **kwargs):
         raise AssertionError("autoregressive rollout must not call q_phi")
@@ -776,7 +1464,9 @@ def _build_graph_jepa(
 ) -> GraphJEPA:
     return GraphJEPA(
         graph_encoder=GraphEncoder.from_parsed_problem(parsed, hidden_dim=16, embed_dim=8, num_layers=2),
-        state_encoder=state_encoder if state_encoder is not None else StateEncoderF(embedding_dim=8, latent_dim=6, hidden_dim=10),
+        state_encoder=state_encoder
+        if state_encoder is not None
+        else StateEncoderF(embedding_dim=8, latent_dim=6, hidden_dim=10),
         action_encoder=action_encoder
         if action_encoder is not None
         else ActionEncoder(
@@ -789,7 +1479,9 @@ def _build_graph_jepa(
             ),
             action_dim=6,
         ),
-        predictor=predictor if predictor is not None else ResidualMLPLatentPredictorG(latent_dim=6, action_dim=6, hidden_dim=10),
+        predictor=predictor
+        if predictor is not None
+        else ResidualMLPLatentPredictorG(latent_dim=6, action_dim=6, hidden_dim=10),
         loss_module=GraphJEPALossModule(
             prediction_loss=GraphLatentPredictionLoss(),
             regularization_loss=GraphVCLoss(),

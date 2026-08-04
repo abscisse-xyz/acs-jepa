@@ -271,6 +271,12 @@ ACS-JEPA encodes grounded actions against the current `JEPALatentState`.
 `LatentActionEncoder` gathers action arguments from
 `latent_state.object_latents`.
 
+`GraphJEPA.rollout_grounded_candidates()` can roll out externally supplied
+grounded candidate sequences by encoding each candidate against the immediately
+preceding predicted state. The resulting action latents are internal abstract
+transition controls: candidate identity remains explicit and external, and no
+supported inverse maps a continuous control back to a grounded action.
+
 Both use `PooledArgumentEncoder` or `RNNArgumentEncoder` for role-aware argument
 composition. `ActionEncoder.forward()` accepts either one action batch or a
 batched temporal action tensor `[B, K, ...]` and returns `[B, D_a]` or
@@ -372,7 +378,8 @@ inverse-dynamics terms are averaged over adjacent trajectory steps.
 
 ## Action Decoding
 
-`ActionDecoder` maps an action latent back to a type-valid grounded action. It
+`ActionDecoder` heuristically searches for and selects a nearby type-valid
+grounded candidate. It
 builds an `ActionDecodingSpace` from the parsed problem, where a candidate has
 the form
 
@@ -390,11 +397,18 @@ Two decoding modes are implemented:
 
 Each candidate action is tensorized, encoded with the same latent action encoder
 against the current `JEPALatentState`, and scored against the target action
-latent using either negative squared distance or cosine similarity. The decoder
-does not enforce state-dependent preconditions; those must be checked
-separately, for example by using the PDDL simulator during plan-time inspection.
+latent using either negative squared distance or cosine similarity. This is not
+a reliable inverse: the decoder does not guarantee applicability,
+symbolic validity, or preservation of candidate identity. Those properties must
+be checked separately, for example by using the PDDL simulator during plan-time
+inspection.
 
 ## Planning
+
+Candidate rollout predicts latent states and internal controls only. Candidate
+identity and generation, applicability and symbolic-validity checks, search,
+and execution remain external concerns and separate future Branch D work; this
+API does not establish planning success.
 
 Inference-time planning is implemented outside `GraphJEPA`. `LatentMPPIPlanner`
 depends directly on the `graph_encoder`, `state_encoder`, `predictor`, and a

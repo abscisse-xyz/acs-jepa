@@ -30,7 +30,7 @@ from acs_jepa.goals import (
     SampleSetGoalEnergy,
     build_predicate_evaluator,
 )
-from acs_jepa.jepa import GraphJEPA, GraphJEPATrainingOutput
+from acs_jepa.jepa import GraphJEPA, GraphJEPACandidateRolloutOutput, GraphJEPATrainingOutput
 from acs_jepa.losses import (
     ActionContrastiveLoss,
     ActionContrastiveLossOutput,
@@ -109,6 +109,7 @@ __all__ = [
     "GraphStateProjector",
     "GraphInverseDynamicsModel",
     "GraphJEPA",
+    "GraphJEPACandidateRolloutOutput",
     "GraphJEPALossModule",
     "GraphJEPALossOutput",
     "GraphJEPATrainingOutput",
