@@ -140,3 +140,24 @@ Review 6 verified that:
 - the study is scientifically coherent, falsifiable, bounded, and deterministic enough to authorize a separate strict-TDD implementation plan.
 
 Authorization boundary: this PASS authorizes planning only. It does not authorize implementation, training, tuning, planner integration, or promotion. `BRANCH_D_ABSTRACT_ACTIONS` remains the operational default.
+
+## Review 20
+
+Date: 2026-08-05
+Reviewer: independent adversarial exact-SHA review `deleg_513931ae`
+Result: **PASS**
+Reviewed specification SHA-256: `ada8fb118e52e876a0bda47d69ea663d9cac74c5cac44f1e05505affa9fabb58`
+Live transcript: `/opt/data/cache/delegation/live/deleg_513931ae/task-0.log`
+
+Review 20 independently inspected the exact locked bytes and verified:
+
+- complete graph, object, state, action, predictor, target, applicability, argument, loss, and query boundary coverage against the repository implementation;
+- the exact applicability DAG, including slot/object multiplicative interaction and graph/object-summary absolute-difference paths;
+- architecture, objective, loss, and gradient ownership;
+- deterministic populations, estimators, schedules, reductions, and initialization;
+- the complete `130/48/20` campaign protocol, `3x7`/39-checkpoint sensitivity design, resource cap, sequential gates, and branch precedence;
+- locally conditioned SIGReg as the preregistered default with matched causal controls;
+- transition compatibility/applicability separation and untouched-test isolation; and
+- no implementation-changing blocker in the reviewed bytes.
+
+Authorization boundary: this exact-SHA PASS authorizes only preparation of a separate strict-TDD implementation plan. It does not authorize implementation, training, tuning, evidence generation, planner integration, promotion, commit, or push. `BRANCH_D_ABSTRACT_ACTIONS` remains active.
